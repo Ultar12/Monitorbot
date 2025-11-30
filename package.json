@@ -1,0 +1,14 @@
+{
+  "name": "otp-monitor-userbot",
+  "version": "1.0.0",
+  "description": "Telegram Userbot to monitor OTPs and match against VCF contacts",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegram": "^2.22.2",
+    "input": "^1.0.1",
+    "dotenv": "^16.3.1"
+  }
+}
