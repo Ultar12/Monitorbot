@@ -21,9 +21,8 @@ const allowedUsers = allowedUsersRaw.split(',')
     .map(id => parseInt(id.trim()))
     .filter(id => !isNaN(id));
 
-// STORAGE
 let targetNumbers = new Set(); 
-let pendingSearches = new Map(); // Key=RealNumber, Value={chatId, timer}
+let pendingSearches = new Map(); 
 
 // --- 3. DATABASE ---
 async function backupDatabase(client) {
@@ -57,7 +56,8 @@ async function restoreDatabase(client) {
     }
 }
 
-// --- 4. PARSING ---
+// --- 4. PARSING LOGIC ---
+
 function extractNumbersFromText(textContent) {
     const regex = /(?:\+|)\d{7,15}/g;
     const matches = textContent.match(regex);
@@ -65,26 +65,62 @@ function extractNumbersFromText(textContent) {
     return matches.map(num => num.replace(/\+/g, ''));
 }
 
+// Helper to handle weird unicode asterisks
+function normalizeMask(input) {
+    // Replaces ⁕ (U+2055), ⁎ (U+204E), ∗ (U+2217), • (U+2022) with standard *
+    return input.replace(/[\u2055\u204E\u2217\u2022]/g, '*');
+}
+
 function isMaskedMatch(realNumber, maskedNumber) {
-    const cleanMasked = maskedNumber.replace(/[^0-9*]/g, ''); 
+    // 1. Normalize weird symbols to normal '*'
+    let cleanMasked = normalizeMask(maskedNumber);
+    
+    // 2. Remove anything that isn't a digit or *
+    cleanMasked = cleanMasked.replace(/[^0-9*]/g, ''); 
+    
     if (realNumber === cleanMasked) return true;
+
     if (cleanMasked.includes('*')) {
         const parts = cleanMasked.split('*').filter(p => p.length > 0);
         if (parts.length < 1) return false;
+        
         const prefix = parts[0];
         const suffix = parts[parts.length - 1];
+
         return realNumber.startsWith(prefix) && realNumber.endsWith(suffix);
     }
     return false;
 }
 
-function parseMessageForOtp(text) {
-    if (!text || text.length < 5) return null;
-    const otpRegex = /(?:\b\d{3}[-\s]\d{3}\b|\b\d{6}\b)/;
-    const numRegex = /([0-9]+\*+[0-9]+)/;
+function parseMessageFull(message) {
+    if (!message) return null;
 
-    const otpMatch = text.match(otpRegex);
-    const numMatch = text.match(numRegex);
+    let combinedText = message.message || ""; 
+
+    // Combine Text + Button Text
+    if (message.replyMarkup && message.replyMarkup.rows) {
+        message.replyMarkup.rows.forEach(row => {
+            if (row.buttons) {
+                row.buttons.forEach(btn => {
+                    if (btn.text) combinedText += " " + btn.text;
+                });
+            }
+        });
+    }
+
+    if (combinedText.length < 5) return null;
+
+    // --- UPDATED REGEX ---
+    
+    // 1. Find OTP: Matches "437-317" or "366 113" or "123456"
+    const otpRegex = /(?:\b\d{3}[-\s]\d{3}\b|\b\d{6}\b)/;
+    
+    // 2. Find Number: Matches digits + any type of asterisk/dot + digits
+    // Handles: 23470****9145 AND 23470⁕⁕⁕⁕9145
+    const numRegex = /([0-9]+[*\u2055\u204E\u2217\u2022]+[0-9]+)/;
+
+    const otpMatch = combinedText.match(otpRegex);
+    const numMatch = combinedText.match(numRegex);
 
     if (otpMatch && numMatch) {
         return {
@@ -114,16 +150,15 @@ function parseMessageForOtp(text) {
     // --- MONITORING ---
     client.addEventHandler(async (event) => {
         const message = event.message;
-        const text = message.text || "";
-        
-        const data = parseMessageForOtp(text);
+        const data = parseMessageFull(message);
         
         if (data) {
-            // 1. ACTIVE SEARCH CHECK
+            // Active Search
             for (const [realNum, searchInfo] of pendingSearches) {
                 if (isMaskedMatch(realNum, data.number)) {
                     clearTimeout(searchInfo.timer);
                     pendingSearches.delete(realNum);
+
                     await client.sendMessage(searchInfo.chatId, { 
                         message: `[FOUND] Live Match\nSource: ${data.number}\nOTP Below:`
                     });
@@ -135,7 +170,7 @@ function parseMessageForOtp(text) {
                 }
             }
 
-            // 2. PASSIVE DATABASE CHECK
+            // Database Check
             let foundRealNumber = null;
             for (const myNum of targetNumbers) {
                 if (isMaskedMatch(myNum, data.number)) {
@@ -170,14 +205,13 @@ function parseMessageForOtp(text) {
 
         const text = message.text || "";
 
-        // /start
         if (text === "/start") {
             await message.reply({ 
-                message: "SYSTEM ONLINE\n\nCOMMANDS:\n/save - Add from file\n/delete - Remove from file\n/clear - Wipe DB\n/s <number> - Search (History + Live)\n/join <link> - Join group"
+                message: "SYSTEM ONLINE\n\nCOMMANDS:\n/save - Add from file\n/delete - Remove from file\n/clear - Wipe DB\n/s <number> - Deep Search\n/join <link> - Join group"
             });
         }
 
-        // /s (DEEP SEARCH - FIXED)
+        // --- /s (DEEP SEARCH) ---
         if (text.startsWith("/s ")) {
             const queryNum = text.split(" ")[1];
             if (!queryNum) return await message.reply({ message: "[ERROR] Format: /s 23480..." });
@@ -185,31 +219,28 @@ function parseMessageForOtp(text) {
             const cleanQueryNum = queryNum.replace(/\D/g, '');
             const chatId = message.chatId;
 
-            await message.reply({ message: `[SEARCHING] Checking history...` });
+            await message.reply({ message: `[SEARCHING] Deep scanning for ${cleanQueryNum}...` });
 
             try {
-                // FIXED: Now we provide EVERY SINGLE PARAMETER required by GramJS
                 const thirtyMinsAgo = Math.floor(Date.now() / 1000) - 1800;
-                
-                // We search for just the last 4 digits to find potential matches
                 const suffix = cleanQueryNum.slice(-4);
-
+                
                 const result = await client.invoke(new Api.messages.SearchGlobal({
                     q: suffix,
                     filter: new Api.InputMessagesFilterEmpty(),
-                    minDate: thirtyMinsAgo,
-                    maxDate: 0,              // Was missing
-                    offsetRate: 0,           // Was missing
-                    offsetPeer: new Api.InputPeerEmpty(), // Was missing
-                    offsetId: 0,             // Was missing
+                    minDate: thirtyMinsAgo, 
+                    maxDate: 0,
+                    offsetRate: 0,
+                    offsetPeer: new Api.InputPeerEmpty(),
+                    offsetId: 0,
                     limit: 50,
-                    folderId: 0              // Optional but good to be explicit
+                    folderId: 0
                 }));
 
                 let found = false;
                 if (result.messages) {
                     for (const msg of result.messages) {
-                        const data = parseMessageForOtp(msg.message || "");
+                        const data = parseMessageFull(msg);
                         if (data && isMaskedMatch(cleanQueryNum, data.number)) {
                             await message.reply({ 
                                 message: `[FOUND HISTORY]\nSource: ${data.number}\nOTP: \`${data.otp}\``,
@@ -223,13 +254,12 @@ function parseMessageForOtp(text) {
 
                 if (found) return; 
 
-                // If not found, start listening
                 await message.reply({ message: `[WAITING] Not in history. Listening live for 2 minutes...` });
 
                 const timer = setTimeout(async () => {
                     if (pendingSearches.has(cleanQueryNum)) {
                         pendingSearches.delete(cleanQueryNum);
-                        await client.sendMessage(chatId, { message: `[TIMEOUT] No OTP found for ${cleanQueryNum}.` });
+                        await client.sendMessage(chatId, { message: `[TIMEOUT] Search ended for ${cleanQueryNum}.` });
                     }
                 }, 120000); 
 
@@ -241,14 +271,13 @@ function parseMessageForOtp(text) {
             }
         }
 
-        // /clear
+        // Standard commands
         if (text === "/clear") {
             targetNumbers.clear();
             await backupDatabase(client);
             await message.reply({ message: `[DONE] Database wiped.` });
         }
 
-        // /join
         if (text.startsWith("/join ")) {
             try {
                 const link = text.split(" ")[1];
@@ -260,7 +289,6 @@ function parseMessageForOtp(text) {
             }
         }
 
-        // /save
         if (text === "/save" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
@@ -277,7 +305,6 @@ function parseMessageForOtp(text) {
             }
         }
 
-        // /delete
         if (text === "/delete" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
