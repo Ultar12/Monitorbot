@@ -7,7 +7,7 @@ const express = require('express');
 // --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System V13 Operational'));
+app.get('/', (req, res) => res.send('System V14 Operational'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 // --- CONFIG ---
@@ -22,15 +22,14 @@ const allowedUsersRaw = process.env.ALLOWED_USERS || "";
 const allowedUsers = allowedUsersRaw.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 
 // --- GLOBAL VARIABLES ---
-let targetNumbers = new Set(); // Managed by Client A
-let responseFilters = new Map(); // Managed by Client B
+let targetNumbers = new Set(); 
+let responseFilters = new Map(); 
 let pendingSearches = new Map(); 
 let onlineInterval = null; 
 let ghostMode = true; 
 
 // ============================================================================
 //  CORE 1: CLIENT A (THE HUNTER)
-//  - Tasks: OTP Monitoring, Number Database, Search, Join
 // ============================================================================
 (async () => {
     if (!process.env.SESSION_STRING) return console.log("Skipping Client A");
@@ -41,12 +40,12 @@ let ghostMode = true;
         await clientA.start({ onError: (err) => console.log("Client A Error:", err) });
         console.log("✅ Hunter (A) Online");
     } catch (e) {
-        console.log("❌ Client A Failed. Check Session.", e);
+        console.log("❌ Client A Failed.", e);
     }
 
     setInterval(() => { clientA.getMe().catch(() => {}); }, 30000);
 
-    // --- DATABASE A (Numbers Only) ---
+    // --- DATABASE A ---
     async function backupNumbers() {
         try {
             const payload = { version: 1, numbers: [...targetNumbers] };
@@ -129,7 +128,7 @@ let ghostMode = true;
 
         try {
             if (txt === "/ping") await msg.reply({ message: "🥷 **Hunter (A):** ALIVE" });
-            if (txt === "/start") await msg.reply({ message: "HUNTER V13 (OTP ONLY)" });
+            if (txt === "/start") await msg.reply({ message: "HUNTER V14" });
 
             if (txt === "/clear") { targetNumbers.clear(); await backupNumbers(); await msg.reply({ message: "Numbers Wiped." }); }
             
@@ -199,8 +198,7 @@ let ghostMode = true;
 
 
 // ============================================================================
-//  CORE 2: CLIENT B (THE GHOST + AUTO-RESPONDER)
-//  - Tasks: Ghost Mode, Online Status, /filter (Auto-Reply)
+//  CORE 2: CLIENT B (THE GHOST)
 // ============================================================================
 (async () => {
     if (!process.env.SESSION_STRING_B) return console.log("Skipping Client B");
@@ -211,12 +209,12 @@ let ghostMode = true;
         await clientB.start({ onError: (err) => console.log("Client B Error:", err) });
         console.log("✅ Ghost (B) Online");
     } catch (e) {
-        console.log("❌ Client B Failed. Check Session B.", e);
+        console.log("❌ Client B Failed.", e);
     }
 
     setInterval(() => { clientB.getMe().catch(() => {}); }, 30000);
 
-    // --- DATABASE B (Filters Only) ---
+    // --- DATABASE B (Filters) ---
     async function backupFilters() {
         try {
             const payload = { version: 1, filters: Object.fromEntries(responseFilters) };
@@ -239,74 +237,70 @@ let ghostMode = true;
     }
     await restoreFilters();
 
-    // --- STATUS ---
     async function keepOnline() { try { await clientB.invoke(new Api.account.UpdateStatus({ offline: false })); } catch (e) {} }
 
-    // --- MONITORING (Ghost + Filters) ---
     clientB.addEventHandler(async (event) => {
         const msg = event.message;
-        const text = msg.text || "";
+        // FIXED VARIABLE NAME HERE:
+        const txt = msg.text || ""; 
         const sender = msg.senderId ? Number(msg.senderId) : null;
 
-        // 1. AUTO-RESPONDER (Filters)
+        // 1. AUTO-RESPONDER
         if (responseFilters.size > 0) {
             for (const [trigger, response] of responseFilters) {
-                // Check if message contains trigger (Case Insensitive)
-                if (text.toLowerCase().includes(trigger.toLowerCase())) {
-                    // Prevent responding to self to avoid infinite loops
+                // Using 'txt' correctly now
+                if (txt.toLowerCase().includes(trigger.toLowerCase())) {
                     if (msg.out) continue; 
-                    
                     try { 
                         await msg.reply({ message: response }); 
                         console.log(`[B-FILTER] Triggered: ${trigger}`);
-                        return; // Stop processing
+                        return; 
                     } catch (e) {}
                 }
             }
         }
 
-        // 2. GHOST MODE (Auto-Read)
+        // 2. GHOST MODE
         if (!ghostMode && msg.incoming) { try { await clientB.markAsRead(msg.chatId); } catch (e) {} }
         
-        // 3. COMMANDS (Auth Check)
+        // 3. COMMANDS
         if (!msg.out && !allowedUsers.includes(sender)) return;
 
         if (txt === "/ping") await msg.reply({ message: "👻 **Ghost (B):** ALIVE" });
-        if (txt === "/start") await msg.reply({ message: "GHOST V13 ONLINE\nUse /filter, /online, /ghost" });
+        if (txt === "/start") await msg.reply({ message: "GHOST V14 ONLINE" });
 
-        // --- FILTER COMMANDS (Now on Client B) ---
-        if (text.startsWith("/filter ")) {
-            if (!text.includes(',')) return await msg.reply({ message: "Error: Missing comma.\nUsage: /filter Trigger, Response" });
-            const firstComma = text.indexOf(',');
-            const trigger = text.substring(8, firstComma).trim();
-            const response = text.substring(firstComma + 1).trim();
+        // FILTER COMMANDS
+        if (txt.startsWith("/filter ")) {
+            if (!txt.includes(',')) return await msg.reply({ message: "Error: Missing comma." });
+            const firstComma = txt.indexOf(',');
+            const trigger = txt.substring(8, firstComma).trim();
+            const response = txt.substring(firstComma + 1).trim();
             
             responseFilters.set(trigger, response);
             await backupFilters();
-            await msg.reply({ message: `✅ Filter Set on Client B:\n"${trigger}"` });
+            await msg.reply({ message: `✅ Filter Set: "${trigger}"` });
         }
 
-        if (text.startsWith("/stop ")) {
-            const trig = text.substring(6).trim();
+        if (txt.startsWith("/stop ")) {
+            const trig = txt.substring(6).trim();
             if (responseFilters.delete(trig)) {
                 await backupFilters();
-                await msg.reply({ message: "🗑 Filter Deleted." });
+                await msg.reply({ message: "🗑 Deleted." });
             } else {
-                await msg.reply({ message: "❌ Filter not found." });
+                await msg.reply({ message: "Not found." });
             }
         }
 
-        if (text === "/filters") {
-            let list = "**Active Filters (Client B):**\n";
+        if (txt === "/filters") {
+            let list = "**Active Filters:**\n";
             responseFilters.forEach((v, k) => list += `• \`${k}\`\n`);
             await msg.reply({ message: list });
         }
 
-        // --- GHOST COMMANDS ---
-        if (text === "/online on") { if (onlineInterval) clearInterval(onlineInterval); onlineInterval = setInterval(keepOnline, 60000); await keepOnline(); await msg.reply({ message: "🟢 ON" }); }
-        if (text === "/online off") { if (onlineInterval) { clearInterval(onlineInterval); onlineInterval = null; } await clientB.invoke(new Api.account.UpdateStatus({ offline: true })); await msg.reply({ message: "🔴 OFF" }); }
-        if (text === "/ghost on") { ghostMode = true; await msg.reply({ message: "👻 Ghost ON" }); }
-        if (text === "/ghost off") { ghostMode = false; await msg.reply({ message: "👀 Ghost OFF" }); }
+        if (txt === "/online on") { if (onlineInterval) clearInterval(onlineInterval); onlineInterval = setInterval(keepOnline, 60000); await keepOnline(); await msg.reply({ message: "🟢 ON" }); }
+        if (txt === "/online off") { if (onlineInterval) { clearInterval(onlineInterval); onlineInterval = null; } await clientB.invoke(new Api.account.UpdateStatus({ offline: true })); await msg.reply({ message: "🔴 OFF" }); }
+        if (txt === "/ghost on") { ghostMode = true; await msg.reply({ message: "👻 Ghost ON" }); }
+        if (txt === "/ghost off") { ghostMode = false; await msg.reply({ message: "👀 Ghost OFF" }); }
 
     }, new NewMessage({ incoming: true, outgoing: true }));
 })();
