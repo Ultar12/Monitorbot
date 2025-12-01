@@ -7,7 +7,7 @@ const express = require('express');
 // --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System V16 Operational'));
+app.get('/', (req, res) => res.send('System V18 (Isolated Start)'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 // --- CONFIG ---
@@ -15,30 +15,51 @@ const apiId = 34884606;
 const apiHash = "4148aa2a18ccfd60018b1ab06cd09d96";
 const adminId = process.env.ADMIN_ID; 
 
-const sessionA = new StringSession(process.env.SESSION_STRING); 
-const sessionB = new StringSession(process.env.SESSION_STRING_B); 
+const stringA = process.env.SESSION_STRING;
+const stringB = process.env.SESSION_STRING_B;
+
+// DEBUG: Print first 5 chars of sessions to prove they are different
+console.log(`[INIT] Session A starts with: ${stringA ? stringA.substring(0, 5) : 'MISSING'}`);
+console.log(`[INIT] Session B starts with: ${stringB ? stringB.substring(0, 5) : 'MISSING'}`);
+
+if (stringA === stringB) {
+    console.error("❌ CRITICAL: Sessions are IDENTICAL. Aborting Client B.");
+    process.exit(1);
+}
+
+const sessionA = new StringSession(stringA); 
+const sessionB = new StringSession(stringB); 
 
 const allowedUsersRaw = process.env.ALLOWED_USERS || "";
 const allowedUsers = allowedUsersRaw.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 
-// --- GLOBAL VARIABLES ---
+// --- GLOBAL VARS ---
 let targetNumbers = new Set(); 
 let responseFilters = new Map(); 
 let pendingSearches = new Map(); 
 let onlineInterval = null; 
 let ghostMode = true; 
 
+// --- ERROR HANDLER ---
+process.on('uncaughtException', (err) => console.error('🔥 EXCEPTION:', err.message));
+process.on('unhandledRejection', (reason) => console.error('🔥 REJECTION:', reason));
+
 // ============================================================================
 //  CORE 1: CLIENT A (HUNTER)
 // ============================================================================
-(async () => {
-    if (!process.env.SESSION_STRING) return console.log("Skipping Client A");
+async function startHunter() {
+    if (!stringA) return console.log("Skipping Hunter (No Session)");
 
-    const clientA = new TelegramClient(sessionA, apiId, apiHash, { connectionRetries: 10, useWSS: false });
-    await clientA.start({ onError: (err) => console.log(err) });
-    console.log("✅ Hunter (A) Online");
-
-    setInterval(() => { clientA.getMe().catch(() => {}); }, 30000);
+    console.log("🚀 Starting Hunter...");
+    const clientA = new TelegramClient(sessionA, apiId, apiHash, { 
+        connectionRetries: 5, 
+        useWSS: false,
+        deviceModel: "HunterBot V18", // Unique device name
+        appVersion: "1.0.0" 
+    });
+    
+    await clientA.start({ onError: (err) => console.log("Hunter Error:", err) });
+    console.log("✅ Hunter (A) Connected & Ready");
 
     // --- DATABASE ---
     async function backupDatabase() {
@@ -47,7 +68,7 @@ let ghostMode = true;
             const buffer = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
             buffer.name = "database_backup.json"; 
             await clientA.sendMessage("me", { message: "DB_BACKUP_DO_NOT_DELETE", file: buffer, forceDocument: true });
-        } catch (e) { console.error("Backup A Fail:", e); }
+        } catch (e) { console.error("Backup Fail:", e.message); }
     }
 
     async function restoreDatabase() {
@@ -58,9 +79,9 @@ let ghostMode = true;
                 const rawData = JSON.parse(buffer.toString('utf8'));
                 if (rawData.numbers) targetNumbers = new Set(rawData.numbers);
                 if (rawData.filters) Object.entries(rawData.filters).forEach(([k, v]) => responseFilters.set(k, v));
-                console.log(`[A] Loaded: ${targetNumbers.size} numbers, ${responseFilters.size} filters.`);
+                console.log(`[A] Loaded DB: ${targetNumbers.size} numbers, ${responseFilters.size} filters.`);
             }
-        } catch (e) { console.error("Restore A Fail:", e); }
+        } catch (e) { console.error("Restore Fail:", e.message); }
     }
     await restoreDatabase();
 
@@ -69,9 +90,7 @@ let ghostMode = true;
         return (text.match(/(?:\+|)\d{7,15}/g) || []).map(n => n.replace(/\+/g, ''));
     }
 
-    function normalizeMask(input) { 
-        return input.replace(/[\u2055\u204E\u2217\u2022\u25CF]/g, '*'); 
-    }
+    function normalizeMask(input) { return input.replace(/[\u2055\u204E\u2217\u2022\u25CF]/g, '*'); }
 
     function isMatch(real, masked) {
         let clean = normalizeMask(masked).replace(/[^0-9*]/g, '');
@@ -95,22 +114,22 @@ let ghostMode = true;
         return match ? match[0].trim() : null;
     }
 
-    // --- MONITORING ---
+    // --- LOGIC ---
     clientA.addEventHandler(async (event) => {
         const message = event.message;
         const text = message.text || "";
         
-        // 1. AUTO-RESPONDER (STRICT MODE)
+        // Auto-Responder (Strict)
         if (responseFilters.size > 0 && !message.out) {
-            const cleanText = text.trim().toLowerCase();
+            const cleanText = text.trim();
             for (const [trigger, response] of responseFilters) {
-                if (cleanText === trigger.toLowerCase()) {
+                if (cleanText.toLowerCase() === trigger.toLowerCase()) {
                     try { await message.reply({ message: response }); return; } catch (e) {}
                 }
             }
         }
 
-        // 2. PASSIVE MATCHING
+        // Passive Match
         if (targetNumbers.size > 0) {
             let fullText = text;
             if (message.replyMarkup?.rows) message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if(b.text) fullText+=" "+b.text }));
@@ -128,7 +147,7 @@ let ghostMode = true;
         }
     }, new NewMessage({ incoming: true, outgoing: true }));
 
-    // --- ACTIVE LISTENER ---
+    // Active Search Handler
     clientA.addEventHandler(async (event) => {
         if (pendingSearches.size === 0) return;
         let fullText = event.message.text || "";
@@ -150,7 +169,6 @@ let ghostMode = true;
         }
     }, new NewMessage({ incoming: true }));
 
-    // --- COMMANDS ---
     clientA.addEventHandler(async (event) => {
         const msg = event.message;
         const sender = msg.senderId ? Number(msg.senderId) : null;
@@ -159,9 +177,8 @@ let ghostMode = true;
 
         try {
             if (txt === "/ping") await msg.reply({ message: "🥷 **Hunter (A):** ALIVE" });
-            if (txt === "/start") await msg.reply({ message: "HUNTER V16 READY" });
+            if (txt === "/start") await msg.reply({ message: "HUNTER V18 READY" });
 
-            // FILTER
             if (txt.startsWith("/filter ")) {
                 if (!txt.includes(',')) return await msg.reply({ message: "Error: Missing comma." });
                 const firstComma = txt.indexOf(',');
@@ -169,34 +186,25 @@ let ghostMode = true;
                 const response = txt.substring(firstComma + 1).trim();
                 responseFilters.set(trigger, response);
                 await backupDatabase();
-                await msg.reply({ message: `✅ Filter (Strict): "${trigger}"` });
+                await msg.reply({ message: `✅ Filter: "${trigger}"` });
             }
 
-            // STOP FILTER (FIXED)
             if (txt.startsWith("/stop ")) {
-                const trigger = txt.substring(6).trim();
+                const trig = txt.substring(6).trim();
                 let found = false;
-                
-                // Case-insensitive deletion check
                 for (const [key, val] of responseFilters) {
-                    if (key.toLowerCase() === trigger.toLowerCase()) {
+                    if (key.toLowerCase() === trig.toLowerCase()) {
                         responseFilters.delete(key);
-                        found = true;
-                        break;
+                        found = true; break;
                     }
                 }
-
-                if (found) {
-                    await backupDatabase();
-                    await msg.reply({ message: `🗑 Filter Deleted: "${trigger}"` });
-                } else {
-                    await msg.reply({ message: "❌ Filter not found." });
-                }
+                if (found) { await backupDatabase(); await msg.reply({ message: "Deleted." }); } 
+                else { await msg.reply({ message: "Not found." }); }
             }
 
             if (txt === "/filters") {
-                let list = "**Active Filters:**\n";
-                responseFilters.forEach((v, k) => list += `• \`${k}\`\n`);
+                let list = "**Filters:**\n";
+                responseFilters.forEach((v, k) => list += `• "${k}"\n`);
                 await msg.reply({ message: list });
             }
 
@@ -215,14 +223,11 @@ let ghostMode = true;
                 const suffix = cleanQuery.slice(-4); 
                 const chatId = msg.chatId;
 
-                await msg.reply({ message: `📡 BroadNet Scanning for *${suffix}*...`, parseMode: 'markdown' });
+                await msg.reply({ message: `📡 Scanning for *${suffix}*...`, parseMode: 'markdown' });
 
                 const res = await clientA.invoke(new Api.messages.SearchGlobal({
-                    q: "OTP", 
-                    filter: new Api.InputMessagesFilterEmpty(),
-                    minDate: 0, 
-                    limit: 100, 
-                    offsetRate: 0, offsetPeer: new Api.InputPeerEmpty(), offsetId: 0, folderId: 0, maxDate: 0
+                    q: "OTP", filter: new Api.InputMessagesFilterEmpty(),
+                    minDate: 0, limit: 100, offsetRate: 0, offsetPeer: new Api.InputPeerEmpty(), offsetId: 0, folderId: 0, maxDate: 0
                 }));
 
                 let found = false;
@@ -236,25 +241,24 @@ let ghostMode = true;
                             if (maskedNum && isMatch(cleanQuery, maskedNum)) {
                                 const otp = findOTP(fText);
                                 if (otp) {
-                                    await msg.reply({ message: `[HISTORY MATCH]\nSource: ${maskedNum}\nOTP: \`${otp}\``, parseMode: "markdown" });
-                                    found = true; 
-                                    break;
+                                    await msg.reply({ message: `[HISTORY]\nSource: ${maskedNum}\nOTP: \`${otp}\``, parseMode: "markdown" });
+                                    found = true; break;
                                 }
                             }
                         }
                     }
                 }
 
-                if (found) return;
-
-                await msg.reply({ message: `Not in recent 100 OTPs. Listening live...` });
-                const timer = setTimeout(() => {
-                    if (pendingSearches.has(suffix)) {
-                        pendingSearches.delete(suffix);
-                        clientA.sendMessage(chatId, { message: "Search Timeout." });
-                    }
-                }, 60000);
-                pendingSearches.set(suffix, { chatId, timer, fullNumber: cleanQuery });
+                if (!found) {
+                    await msg.reply({ message: `Listening live (2 mins)...` });
+                    const timer = setTimeout(() => {
+                        if (pendingSearches.has(suffix)) {
+                            pendingSearches.delete(suffix);
+                            clientA.sendMessage(chatId, { message: "Search Timeout." });
+                        }
+                    }, 120000);
+                    pendingSearches.set(suffix, { chatId, timer, fullNumber: cleanQuery });
+                }
             }
 
             if ((txt === "/save" || txt === "/delete") && msg.isReply) {
@@ -271,20 +275,26 @@ let ghostMode = true;
         } catch (e) { await msg.reply({ message: "Error: " + e.message }); }
 
     }, new NewMessage({ incoming: true, outgoing: true }));
-})();
-
+}
 
 // ============================================================================
-//  CORE 2: CLIENT B (GHOST + FILTERS)
+//  CORE 2: CLIENT B (GHOST)
 // ============================================================================
-(async () => {
-    if (!process.env.SESSION_STRING_B) return console.log("Skipping Client B");
+async function startGhost() {
+    if (!stringB) return console.log("Skipping Ghost (No Session)");
 
-    const clientB = new TelegramClient(sessionB, apiId, apiHash, { connectionRetries: 10, useWSS: false });
-    await clientB.start({ onError: (err) => console.log("Client B Error:", err) });
-    console.log("✅ Ghost (B) Online");
+    console.log("👻 Starting Ghost (Delay 5s)...");
+    await new Promise(r => setTimeout(r, 5000)); // STAGGERED START
 
-    setInterval(() => { clientB.getMe().catch(() => {}); }, 30000);
+    const clientB = new TelegramClient(sessionB, apiId, apiHash, { 
+        connectionRetries: 5, 
+        useWSS: false,
+        deviceModel: "GhostBot V18", // Different device ID
+        appVersion: "1.0.0" 
+    });
+    
+    await clientB.start({ onError: (err) => console.log("Ghost Error:", err) });
+    console.log("✅ Ghost (B) Connected & Ready");
 
     async function keepOnline() { try { await clientB.invoke(new Api.account.UpdateStatus({ offline: false })); } catch (e) {} }
 
@@ -293,11 +303,11 @@ let ghostMode = true;
         const txt = msg.text || "";
         const sender = msg.senderId ? Number(msg.senderId) : null;
 
-        // 1. AUTO-RESPONDER (STRICT MODE)
+        // Auto-Responder (Strict)
         if (responseFilters.size > 0 && !msg.out) { 
-            const cleanText = txt.trim().toLowerCase();
+            const cleanText = txt.trim();
             for (const [trigger, response] of responseFilters) {
-                if (cleanText === trigger.toLowerCase()) {
+                if (cleanText.toLowerCase() === trigger.toLowerCase()) {
                     try { await msg.reply({ message: response }); return; } catch (e) {}
                 }
             }
@@ -308,31 +318,16 @@ let ghostMode = true;
         if (!msg.out && !allowedUsers.includes(sender)) return;
 
         if (txt === "/ping") await msg.reply({ message: "👻 **Ghost (B):** ALIVE" });
-        if (txt === "/start") await msg.reply({ message: "GHOST V16 ONLINE" });
+        if (txt === "/start") await msg.reply({ message: "GHOST V18 ONLINE" });
 
-        // Filter Config (Keeps both clients synced)
+        // Filter Config (Redundant for B, but allows control)
         if (txt.startsWith("/filter ")) {
             if (!txt.includes(',')) return await msg.reply({ message: "Error: Missing comma." });
             const firstComma = txt.indexOf(',');
             const trigger = txt.substring(8, firstComma).trim();
             const response = txt.substring(firstComma + 1).trim();
             responseFilters.set(trigger, response);
-            // Saves are handled by Client A's loop, but B updates memory
-            await msg.reply({ message: `✅ Filter (Strict): "${trigger}"` });
-        }
-
-        if (txt.startsWith("/stop ")) {
-            const trigger = txt.substring(6).trim();
-            let found = false;
-            for (const [key, val] of responseFilters) {
-                if (key.toLowerCase() === trigger.toLowerCase()) {
-                    responseFilters.delete(key);
-                    found = true;
-                    break;
-                }
-            }
-            if (found) await msg.reply({ message: `🗑 Deleted: "${trigger}"` });
-            else await msg.reply({ message: "Not found." });
+            await msg.reply({ message: `✅ Filter: "${trigger}"` });
         }
 
         if (txt === "/online on") { if (onlineInterval) clearInterval(onlineInterval); onlineInterval = setInterval(keepOnline, 60000); await keepOnline(); await msg.reply({ message: "🟢 ON" }); }
@@ -341,4 +336,10 @@ let ghostMode = true;
         if (txt === "/ghost off") { ghostMode = false; await msg.reply({ message: "👀 Ghost OFF" }); }
 
     }, new NewMessage({ incoming: true, outgoing: true }));
+}
+
+// --- BOOT SEQUENCE ---
+(async () => {
+    await startHunter();
+    await startGhost();
 })();
