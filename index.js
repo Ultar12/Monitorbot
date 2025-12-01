@@ -4,11 +4,11 @@ const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
 const express = require('express');
 
-// --- 1. SERVER (Keeps Bot Alive) ---
+// --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('Bot is Running...'));
-app.listen(PORT, () => console.log(`Server on port ${PORT}`));
+app.get('/', (req, res) => res.send('System Operational'));
+app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 // --- 2. CONFIG ---
 const apiId = 34884606; 
@@ -21,9 +21,11 @@ const allowedUsers = allowedUsersRaw.split(',')
     .map(id => parseInt(id.trim()))
     .filter(id => !isNaN(id));
 
+// STORAGE
 let targetNumbers = new Set(); 
+let pendingSearches = new Map(); // Store active searches: Key=RealNumber, Value={chatId, timer}
 
-// --- 3. DATABASE (Saved Messages) ---
+// --- 3. DATABASE FUNCTIONS ---
 async function backupDatabase(client) {
     try {
         const data = JSON.stringify([...targetNumbers], null, 2);
@@ -49,15 +51,13 @@ async function restoreDatabase(client) {
             const loadedArray = JSON.parse(buffer.toString('utf8'));
             targetNumbers = new Set(loadedArray);
             console.log(`[RESTORE] Loaded ${targetNumbers.size} numbers.`);
-        } else {
-            console.log("[INFO] No backup found. Database empty.");
         }
     } catch (e) {
         console.error("Restore Error:", e);
     }
 }
 
-// --- 4. PARSING LOGIC ---
+// --- 4. PARSING & MATCHING ---
 function extractNumbersFromText(textContent) {
     const regex = /(?:\+|)\d{7,15}/g;
     const matches = textContent.match(regex);
@@ -65,11 +65,10 @@ function extractNumbersFromText(textContent) {
     return matches.map(num => num.replace(/\+/g, ''));
 }
 
-// Checks if 'realNumber' matches 'maskedNumber'
 function isMaskedMatch(realNumber, maskedNumber) {
     const cleanMasked = maskedNumber.replace(/[^0-9*]/g, ''); 
     
-    // Direct match (if not masked)
+    // Direct match
     if (realNumber === cleanMasked) return true;
 
     // Masked match (e.g. 234***567)
@@ -80,22 +79,17 @@ function isMaskedMatch(realNumber, maskedNumber) {
         const prefix = parts[0];
         const suffix = parts[parts.length - 1];
 
-        // Ensure the real number starts with prefix AND ends with suffix
         return realNumber.startsWith(prefix) && realNumber.endsWith(suffix);
     }
     return false;
 }
 
-// Scans text for OTPs and Numbers
 function parseMessageForOtp(text) {
     if (!text || text.length < 5) return null;
 
-    // OTP Regex: "123-456" OR "123 456" OR "Code 123456" OR "123456"
-    // We look for 6 digits, optionally separated by dash/space
+    // Regex for OTP (123-456 or 123456)
     const otpRegex = /(?:\b\d{3}[-\s]\d{3}\b|\b\d{6}\b)/;
-    
-    // Number Regex: Digits followed by * followed by digits (e.g., 234***567)
-    // Matches "234***567" or "+234***567"
+    // Regex for Masked/Full Number
     const numRegex = /([0-9]+\*+[0-9]+)/;
 
     const otpMatch = text.match(otpRegex);
@@ -113,7 +107,7 @@ function parseMessageForOtp(text) {
 // --- 5. MAIN ---
 (async () => {
     if (!sessionString) {
-        console.error("FATAL: SESSION_STRING is missing.");
+        console.error("FATAL: SESSION_STRING missing.");
         process.exit(1);
     }
 
@@ -122,11 +116,11 @@ function parseMessageForOtp(text) {
     });
 
     await client.start({ onError: (err) => console.log(err) });
-    console.log("[START] Bot is logged in.");
+    console.log("[START] System Online");
     
     await restoreDatabase(client);
 
-    // --- MONITORING (PASSIVE) ---
+    // --- MONITORING (PASSIVE & ACTIVE) ---
     client.addEventHandler(async (event) => {
         const message = event.message;
         const text = message.text || "";
@@ -134,9 +128,30 @@ function parseMessageForOtp(text) {
         const data = parseMessageForOtp(text);
         
         if (data) {
-            // Check if this masked number matches any number in our DB
+            // 1. CHECK PENDING SEARCHES (Active Hunting)
+            // We check this first to auto-complete any /s commands
+            for (const [realNum, searchInfo] of pendingSearches) {
+                if (isMaskedMatch(realNum, data.number)) {
+                    // STOP SEARCH
+                    clearTimeout(searchInfo.timer);
+                    pendingSearches.delete(realNum);
+
+                    // NOTIFY
+                    await client.sendMessage(searchInfo.chatId, { 
+                        message: `[FOUND] Live Match\n` +
+                                 `Source: ${data.number}\n` +
+                                 `OTP Below:`
+                    });
+                    await client.sendMessage(searchInfo.chatId, { 
+                        message: `\`${data.otp}\``,
+                        parseMode: "markdown"
+                    });
+                    return; // Stop here if it was a pending search
+                }
+            }
+
+            // 2. CHECK DATABASE (Passive Monitoring)
             let foundRealNumber = null;
-            
             for (const myNum of targetNumbers) {
                 if (isMaskedMatch(myNum, data.number)) {
                     foundRealNumber = myNum;
@@ -147,12 +162,11 @@ function parseMessageForOtp(text) {
             if (foundRealNumber) {
                 if (adminId) {
                     await client.sendMessage(adminId, { 
-                        message: `[ALERT] MATCH FOUND\n\n` +
-                                 `Real Num: ${foundRealNumber}\n` +
+                        message: `[ALERT] Database Match\n` +
+                                 `Real: ${foundRealNumber}\n` +
                                  `Masked: ${data.number}\n` +
                                  `OTP Below:`
                     });
-                    // Send OTP in monospace for easy copying
                     await client.sendMessage(adminId, { 
                         message: `\`${data.otp}\``,
                         parseMode: "markdown"
@@ -174,127 +188,125 @@ function parseMessageForOtp(text) {
 
         const text = message.text || "";
 
-        // --- /start ---
+        // /start
         if (text === "/start") {
             await message.reply({ 
                 message: "SYSTEM ONLINE\n\n" +
                          "COMMANDS:\n" +
                          "/save - Reply to file to add numbers\n" +
-                         "/delete - Reply to file to remove numbers\n" +
-                         "/clear - Wipe database\n" +
-                         "/s <number> - Search OTP for number\n" +
+                         "/delete - Reply to file to remove\n" +
+                         "/clear - Wipe all numbers\n" +
+                         "/s <number> - Deep Search (History + Live)\n" +
                          "/join <link> - Join group\n\n" +
-                         `Database Size: ${targetNumbers.size}`
+                         `Storage: ${targetNumbers.size} numbers`
             });
         }
 
-        // --- /s (SEARCH) ---
+        // /s (DEEP SEARCH)
         if (text.startsWith("/s ")) {
             const queryNum = text.split(" ")[1];
-            if (!queryNum) return await message.reply({ message: "[ERROR] Provide number. Ex: /s +23480..." });
+            if (!queryNum) return await message.reply({ message: "[ERROR] Format: /s 23480..." });
 
-            await message.reply({ message: `[SEARCHING] Scanning global history for ${queryNum}...` });
+            const cleanQueryNum = queryNum.replace(/\D/g, '');
+            const chatId = message.chatId;
+
+            await message.reply({ message: `[SEARCHING] Checking last 30 mins history for ${cleanQueryNum}...` });
 
             try {
-                // Search strategy: Search for last 4 digits (Suffix)
-                const suffix = queryNum.replace(/\D/g, '').slice(-4);
-                
+                // 1. SEARCH HISTORY (Last 30 mins)
+                const suffix = cleanQueryNum.slice(-4);
+                const thirtyMinsAgo = Math.floor(Date.now() / 1000) - 1800;
+
                 const result = await client.invoke(new Api.messages.SearchGlobal({
                     q: suffix,
                     filter: new Api.InputMessagesFilterEmpty(),
-                    minDate: 0,
-                    maxDate: 0,
-                    offsetRate: 0,
-                    offsetPeer: new Api.InputPeerEmpty(),
-                    offsetId: 0,
-                    limit: 50 // Check last 50 matches
+                    minDate: thirtyMinsAgo, 
+                    limit: 50 
                 }));
 
                 let found = false;
-
                 if (result.messages) {
                     for (const msg of result.messages) {
-                        const msgText = msg.message || "";
-                        const data = parseMessageForOtp(msgText);
-
-                        if (data) {
-                            // Check if the masked number in message matches the full number provided
-                            if (isMaskedMatch(queryNum.replace(/\D/g, ''), data.number)) {
-                                await message.reply({ 
-                                    message: `[FOUND]\nOTP: \`${data.otp}\`\nSource: ${data.number}`,
-                                    parseMode: "markdown"
-                                });
-                                found = true;
-                                break; // Stop after first match
-                            }
+                        const data = parseMessageForOtp(msg.message || "");
+                        if (data && isMaskedMatch(cleanQueryNum, data.number)) {
+                            await message.reply({ 
+                                message: `[FOUND HISTORY]\nSource: ${data.number}\nOTP: \`${data.otp}\``,
+                                parseMode: "markdown"
+                            });
+                            found = true;
+                            break; 
                         }
                     }
                 }
 
-                if (!found) {
-                    await message.reply({ message: "[RESULT] No OTP found for this number in recent history." });
-                }
+                if (found) return; // Stop if found in history
+
+                // 2. ACTIVATE LISTENER (Not found in history)
+                await message.reply({ message: `[WAITING] Not in history. Listening live for 2 minutes...` });
+
+                // Set Timer to stop listening after 2 mins
+                const timer = setTimeout(async () => {
+                    if (pendingSearches.has(cleanQueryNum)) {
+                        pendingSearches.delete(cleanQueryNum);
+                        await client.sendMessage(chatId, { message: `[TIMEOUT] Search ended for ${cleanQueryNum}. No OTP found.` });
+                    }
+                }, 120000); // 120 seconds
+
+                // Add to Map
+                pendingSearches.set(cleanQueryNum, { chatId, timer });
 
             } catch (e) {
                 await message.reply({ message: "[ERROR] Search failed: " + e.message });
             }
         }
 
-        // --- /clear ---
+        // /clear
         if (text === "/clear") {
             const count = targetNumbers.size;
             targetNumbers.clear();
             await backupDatabase(client);
-            await message.reply({ message: `[DONE] Database cleared. Removed ${count} numbers.` });
+            await message.reply({ message: `[DONE] Database wiped. Removed ${count} numbers.` });
         }
 
-        // --- /join ---
+        // /join
         if (text.startsWith("/join ")) {
             try {
                 const link = text.split(" ")[1];
                 let hash = link.replace(/https:\/\/t\.me\/(\+|joinchat\/)/, "");
                 await client.invoke(new Api.messages.ImportChatInvite({ hash: hash }));
-                await message.reply({ message: "[SUCCESS] Joined group." });
+                await message.reply({ message: "[SUCCESS] Joined." });
             } catch (e) {
                 await message.reply({ message: "[FAIL] " + (e.errorMessage || e.message) });
             }
         }
 
-        // --- /save ---
+        // /save
         if (text === "/save" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
-                await message.reply({ message: "[PROCESSING] Reading file..." });
+                await message.reply({ message: "[PROCESSING] Reading..." });
                 try {
                     const buffer = await client.downloadMedia(replyMsg, {});
-                    const content = buffer.toString('utf8');
-                    const newNumbers = extractNumbersFromText(content);
-                    
-                    if (newNumbers.length > 0) {
-                        newNumbers.forEach(n => targetNumbers.add(n));
-                        await backupDatabase(client);
-                        await message.reply({ message: `[SUCCESS] Added ${newNumbers.length} numbers.\nTotal: ${targetNumbers.size}` });
-                    } else {
-                        await message.reply({ message: "[ERROR] No numbers found." });
-                    }
+                    const newNumbers = extractNumbersFromText(buffer.toString('utf8'));
+                    newNumbers.forEach(n => targetNumbers.add(n));
+                    await backupDatabase(client);
+                    await message.reply({ message: `[SUCCESS] Added: ${newNumbers.length}\nTotal: ${targetNumbers.size}` });
                 } catch (e) {
-                    await message.reply({ message: "[ERROR] Reading file failed." });
+                    await message.reply({ message: "[ERROR] File read failed." });
                 }
             }
         }
 
-        // --- /delete ---
+        // /delete
         if (text === "/delete" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
                 const buffer = await client.downloadMedia(replyMsg, {});
                 const delNums = extractNumbersFromText(buffer.toString('utf8'));
-                
-                const beforeSize = targetNumbers.size;
+                const before = targetNumbers.size;
                 delNums.forEach(n => targetNumbers.delete(n));
-                
                 await backupDatabase(client);
-                await message.reply({ message: `[DONE] Removed: ${beforeSize - targetNumbers.size}` });
+                await message.reply({ message: `[DONE] Removed: ${before - targetNumbers.size}` });
             }
         }
 
