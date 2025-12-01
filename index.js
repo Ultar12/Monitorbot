@@ -7,8 +7,8 @@ const express = require('express');
 // --- 1. KEEP-ALIVE SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('🚀 Bot is Active & Listening...'));
-app.listen(PORT, () => console.log(`🌐 Web server running on port ${PORT}`));
+app.get('/', (req, res) => res.send('Bot is Active and Listening...'));
+app.listen(PORT, () => console.log(`Web server running on port ${PORT}`));
 
 // --- 2. CONFIGURATION ---
 const apiId = 34884606; 
@@ -16,16 +16,13 @@ const apiHash = "4148aa2a18ccfd60018b1ab06cd09d96";
 const sessionString = process.env.SESSION_STRING; 
 const adminId = process.env.ADMIN_ID; 
 
-// CONFIGURING ALLOWED USERS
-// We read a comma-separated list from Env Vars (e.g. "12345, 67890")
+// ALLOWED USERS CONFIG
 const allowedUsersRaw = process.env.ALLOWED_USERS || "";
 const allowedUsers = allowedUsersRaw.split(',')
     .map(id => parseInt(id.trim()))
     .filter(id => !isNaN(id));
 
-console.log(`👥 Allowed Users: You + ${allowedUsers.length} friends`);
-
-// We use a Set instead of an Array for performance
+// Database Storage
 let targetNumbers = new Set(); 
 
 // --- 3. DATABASE SYSTEM ---
@@ -36,11 +33,11 @@ async function backupDatabase(client) {
         buffer.name = "database_backup.json"; 
         
         await client.sendMessage("me", {
-            message: `📂 #DB_BACKUP\nCount: ${targetNumbers.size}\n(Do not delete)`,
+            message: "DB_BACKUP\n(Do not delete this message)",
             file: buffer,
             forceDocument: true
         });
-        console.log(`💾 Backed up ${targetNumbers.size} numbers.`);
+        console.log(`Backed up ${targetNumbers.size} numbers.`);
     } catch (e) {
         console.error("Backup failed:", e);
     }
@@ -48,23 +45,23 @@ async function backupDatabase(client) {
 
 async function restoreDatabase(client) {
     try {
-        console.log("🔄 Searching for backups...");
-        const result = await client.getMessages("me", { search: "#DB_BACKUP", limit: 1 });
+        console.log("Searching for backups...");
+        const result = await client.getMessages("me", { search: "DB_BACKUP", limit: 1 });
         
         if (result && result.length > 0 && result[0].media) {
             const buffer = await client.downloadMedia(result[0], {});
             const loadedArray = JSON.parse(buffer.toString('utf8'));
             targetNumbers = new Set(loadedArray);
-            console.log(`✅ Restored ${targetNumbers.size} numbers.`);
+            console.log(`Restored ${targetNumbers.size} numbers.`);
         } else {
-            console.log("⚠️ No backup found. Starting fresh.");
+            console.log("No backup found. Starting fresh.");
         }
     } catch (e) {
         console.error("Restore failed:", e);
     }
 }
 
-// --- 4. OPTIMIZED PARSERS ---
+// --- 4. PARSERS ---
 function extractNumbersFromText(textContent) {
     const regex = /(?:\+|)\d{7,15}/g;
     const matches = textContent.match(regex);
@@ -74,8 +71,11 @@ function extractNumbersFromText(textContent) {
 
 function isMatch(msgNumber) {
     const cleanMsgNumber = msgNumber.replace(/[^0-9*]/g, ''); 
+    
+    // Direct match
     if (targetNumbers.has(cleanMsgNumber)) return cleanMsgNumber;
 
+    // Masked match (e.g. 234***567)
     if (cleanMsgNumber.includes('*')) {
         const parts = cleanMsgNumber.split('*').filter(p => p.length > 0);
         if (parts.length < 1) return false;
@@ -95,7 +95,7 @@ function isMatch(msgNumber) {
 // --- 5. MAIN LOGIC ---
 (async () => {
     if (!sessionString) {
-        console.error("❌ ERROR: SESSION_STRING missing in Env Vars!");
+        console.error("ERROR: SESSION_STRING missing in Env Vars!");
         process.exit(1);
     }
 
@@ -104,37 +104,52 @@ function isMatch(msgNumber) {
     });
 
     await client.start({ onError: (err) => console.log(err) });
-    console.log("✅ Logged in!");
+    console.log("Logged in successfully!");
     
     await restoreDatabase(client);
 
-    // --- MONITORING (Incoming OTPs) ---
-    // This listens to EVERYTHING incoming to detect OTPs
+    // --- MONITORING LOGIC ---
     client.addEventHandler(async (event) => {
         const message = event.message;
         const text = message.text || "";
 
-        if (!text.toLowerCase().includes("otp") && !text.toLowerCase().includes("code")) return;
+        // Minimal filter to reduce CPU usage, but generic enough for new format
+        // We look for any text that might contain a masked number OR an OTP format
+        if (text.length < 5) return;
 
         try {
-            const otpMatch = text.match(/(?:OTP|Code)\s*[:\-]\s*([\d]{3}[-\s]?[\d]{3})/i);
-            const numMatch = text.match(/Number\s*[:\-]\s*([+\d*]+)/i);
+            // Regex Explanations:
+            // OTP: Looks for "123-456" OR "123 456" OR "Code 123456"
+            // It searches for isolated 6-digit patterns or 3-dash-3 patterns
+            const otpRegex = /(?:\b\d{3}[-\s]\d{3}\b|\b\d{6}\b)/;
+            
+            // Number: Looks for digits mixed with asterisks (e.g., 234***567)
+            const numRegex = /([0-9]+\*+[0-9]+)/;
+
+            const otpMatch = text.match(otpRegex);
+            const numMatch = text.match(numRegex);
 
             if (otpMatch && numMatch) {
-                const capturedOtp = otpMatch[1];
-                const capturedNumber = numMatch[1];
+                const capturedOtp = otpMatch[0].trim(); // "105-354"
+                const capturedNumber = numMatch[0].trim(); // "234***3560"
+
                 const matchedRealNumber = isMatch(capturedNumber);
 
                 if (matchedRealNumber) {
-                    // Alert the Main Admin
                     if (adminId) {
+                        // Send simple alert to admin
                         await client.sendMessage(adminId, { 
-                            message: `🚨 **MATCH FOUND!**\n\n` +
-                                     `📞 Real: \`${matchedRealNumber}\`\n` +
-                                     `📨 Masked: \`${capturedNumber}\`\n` +
-                                     `🔑 OTP: \`${capturedOtp}\`\n`
+                            message: `MATCH FOUND\n\n` +
+                                     `My Number: ${matchedRealNumber}\n` +
+                                     `Msg Number: ${capturedNumber}\n` +
+                                     `OTP Below:`
                         });
-                        await client.sendMessage(adminId, { message: capturedOtp });
+                        
+                        // Send OTP in monospace format for one-tap copy
+                        await client.sendMessage(adminId, { 
+                            message: `\`${capturedOtp}\``,
+                            parseMode: "markdown"
+                        });
                     }
                 }
             }
@@ -143,39 +158,48 @@ function isMatch(msgNumber) {
         }
     }, new NewMessage({ incoming: true })); 
 
-    // --- COMMANDS (/join, /save, /delete) ---
-    // Now listens to incoming AND outgoing so friends can use it
+    // --- COMMANDS ---
     client.addEventHandler(async (event) => {
         const message = event.message;
         const senderId = message.senderId ? Number(message.senderId) : null;
         
-        // --- SECURITY CHECK ---
-        // Allow if: 1. It is YOU (outgoing) OR 2. Sender is in the ALLOWED list
         const isMe = message.out;
         const isAllowedFriend = allowedUsers.includes(senderId);
 
-        if (!isMe && !isAllowedFriend) return; // Ignore everyone else
-        // ----------------------
+        if (!isMe && !isAllowedFriend) return; 
 
         const text = message.text || "";
 
-        // /join https://t.me/...
+        // /start
+        if (text === "/start") {
+            await message.reply({ 
+                message: "Bot is Online.\n\n" +
+                         "Commands:\n" +
+                         "/save - Reply to a file to add numbers\n" +
+                         "/delete - Reply to a file to remove numbers\n" +
+                         "/clear - Delete ALL numbers from database\n" +
+                         "/join <link> - Join a group\n\n" +
+                         `Current Database Size: ${targetNumbers.size}`
+            });
+        }
+
+        // /join
         if (text.startsWith("/join ")) {
             try {
                 const link = text.split(" ")[1];
                 let hash = link.replace(/https:\/\/t\.me\/(\+|joinchat\/)/, "");
                 await client.invoke(new Api.messages.ImportChatInvite({ hash: hash }));
-                await message.reply({ message: "✅ Joined!" });
+                await message.reply({ message: "Joined successfully." });
             } catch (e) {
-                await message.reply({ message: "❌ " + (e.errorMessage || e.message) });
+                await message.reply({ message: "Failed: " + (e.errorMessage || e.message) });
             }
         }
 
-        // /save (Reply to ANY text file)
+        // /save
         if (text === "/save" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
-                await message.reply({ message: "⏳ Processing file..." });
+                await message.reply({ message: "Processing file..." });
                 try {
                     const buffer = await client.downloadMedia(replyMsg, {});
                     const content = buffer.toString('utf8');
@@ -184,17 +208,17 @@ function isMatch(msgNumber) {
                     if (newNumbers.length > 0) {
                         newNumbers.forEach(n => targetNumbers.add(n));
                         await backupDatabase(client);
-                        await message.reply({ message: `✅ **Added ${newNumbers.length} numbers.**\n📚 DB Size: ${targetNumbers.size}` });
+                        await message.reply({ message: `Success. Added ${newNumbers.length} numbers.\nTotal: ${targetNumbers.size}` });
                     } else {
-                        await message.reply({ message: "❌ No valid numbers found." });
+                        await message.reply({ message: "No valid numbers found." });
                     }
                 } catch (e) {
-                    await message.reply({ message: "❌ Error reading file." });
+                    await message.reply({ message: "Error reading file." });
                 }
             }
         }
 
-        // /delete (Reply to file)
+        // /delete
         if (text === "/delete" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
@@ -205,9 +229,18 @@ function isMatch(msgNumber) {
                 delNums.forEach(n => targetNumbers.delete(n));
                 
                 await backupDatabase(client);
-                await message.reply({ message: `🗑 Removed: ${beforeSize - targetNumbers.size}` });
+                await message.reply({ message: `Removed: ${beforeSize - targetNumbers.size}` });
             }
         }
-    }, new NewMessage({ incoming: true, outgoing: true })); // Listen to both sides
+
+        // /clear
+        if (text === "/clear") {
+            const size = targetNumbers.size;
+            targetNumbers.clear();
+            await backupDatabase(client);
+            await message.reply({ message: `Database cleared. Removed ${size} numbers.` });
+        }
+
+    }, new NewMessage({ incoming: true, outgoing: true })); 
 
 })();
