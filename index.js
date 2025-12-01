@@ -4,59 +4,49 @@ const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
 const express = require('express');
 
-// --- 1. SERVER (Keeps Both Bots Alive) ---
+// --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System Operational: Dual Core Active'));
+app.get('/', (req, res) => res.send('Dual Core System Active'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
-// --- CONFIGURATION ---
+// --- CONFIG ---
 const apiId = 34884606; 
 const apiHash = "4148aa2a18ccfd60018b1ab06cd09d96";
 const adminId = process.env.ADMIN_ID; 
 
-// CLIENT A (The Hunter - OTP Monitor)
 const sessionA = new StringSession(process.env.SESSION_STRING); 
-// CLIENT B (The Ghost - Status Manager)
 const sessionB = new StringSession(process.env.SESSION_STRING_B); 
 
-// Allowed Users (Applies to both)
 const allowedUsersRaw = process.env.ALLOWED_USERS || "";
 const allowedUsers = allowedUsersRaw.split(',')
     .map(id => parseInt(id.trim()))
     .filter(id => !isNaN(id));
 
-// --- GLOBAL VARIABLES ---
-let targetNumbers = new Set(); // For Client A
-let pendingSearches = new Map(); // For Client A
-let onlineInterval = null; // For Client B
-let ghostMode = true; // For Client B (Default: ON = Don't mark read)
+// --- GLOBAL VARS ---
+let targetNumbers = new Set(); 
+let pendingSearches = new Map(); 
+let onlineInterval = null; 
+let ghostMode = true; 
 
 // ============================================================================
-//  CORE 1: CLIENT A (OTP HUNTER)
+//  CORE 1: CLIENT A (THE HUNTER)
 // ============================================================================
 (async () => {
-    if (!process.env.SESSION_STRING) {
-        console.log("⚠️ Client A (Hunter) skipped: No SESSION_STRING found.");
-        return;
-    }
+    if (!process.env.SESSION_STRING) return console.log("Skipping Client A");
 
     const clientA = new TelegramClient(sessionA, apiId, apiHash, { connectionRetries: 5 });
-    await clientA.start({ onError: (err) => console.log("Client A Error:", err) });
-    console.log("✅ Client A (Hunter) Online");
+    await clientA.start({ onError: (err) => console.log(err) });
+    console.log("✅ Hunter (A) Online");
 
-    // [Insert previous Database & Parsing functions here for Client A]
-    // ... (Simplified for brevity, using the same logic as V4)
-    // RE-ADDING THE FULL OTP LOGIC FOR CLIENT A BELOW:
-
-    // --- DATABASE A ---
+    // --- DATABASE ---
     async function backupDatabase() {
         try {
             const data = JSON.stringify([...targetNumbers], null, 2);
             const buffer = Buffer.from(data, 'utf8');
             buffer.name = "database_backup.json"; 
             await clientA.sendMessage("me", { message: "DB_BACKUP_DO_NOT_DELETE", file: buffer, forceDocument: true });
-        } catch (e) { console.error("Backup A Error:", e); }
+        } catch (e) { console.error(e); }
     }
 
     async function restoreDatabase() {
@@ -65,14 +55,14 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
             if (result && result.length > 0 && result[0].media) {
                 const buffer = await clientA.downloadMedia(result[0], {});
                 targetNumbers = new Set(JSON.parse(buffer.toString('utf8')));
-                console.log(`[A] Restored ${targetNumbers.size} numbers.`);
+                console.log(`Restored ${targetNumbers.size} numbers.`);
             }
-        } catch (e) { console.error("Restore A Error:", e); }
+        } catch (e) { console.error(e); }
     }
     
     await restoreDatabase();
 
-    // --- PARSING HELPERS ---
+    // --- PARSING ---
     function extractNumbers(text) {
         const regex = /(?:\+|)\d{7,15}/g;
         const matches = text.match(regex);
@@ -107,11 +97,12 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
         return null;
     }
 
-    // --- MONITORING A ---
+    // --- MONITORING (Passive) ---
+    // Note: This reads messages from the socket WITHOUT marking them as read.
+    // Double ticks will NOT appear unless you open the chat on your phone.
     clientA.addEventHandler(async (event) => {
         const data = parseMsg(event.message);
         if (data) {
-            // Check Active Searches
             for (const [real, info] of pendingSearches) {
                 if (isMatch(real, data.number)) {
                     clearTimeout(info.timer);
@@ -120,7 +111,6 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
                     return;
                 }
             }
-            // Check Database
             for (const num of targetNumbers) {
                 if (isMatch(num, data.number)) {
                     if (adminId) await clientA.sendMessage(adminId, { message: `[ALERT] Match: ${num}\nOTP: \`${data.otp}\``, parseMode: "markdown" });
@@ -130,16 +120,15 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
         }
     }, new NewMessage({ incoming: true }));
 
-    // --- COMMANDS A ---
+    // --- COMMANDS ---
     clientA.addEventHandler(async (event) => {
         const msg = event.message;
         const sender = msg.senderId ? Number(msg.senderId) : null;
         if (!msg.out && !allowedUsers.includes(sender)) return;
         const txt = msg.text || "";
 
-        if (txt === "/start") await msg.reply({ message: "HUNTER ACTIVE\n/save, /delete, /clear, /s <num>, /join <link>" });
-        
-        if (txt === "/clear") { targetNumbers.clear(); await backupDatabase(); await msg.reply({ message: "Database wiped." }); }
+        if (txt === "/start") await msg.reply({ message: "HUNTER ONLINE\n/s <num>, /save, /delete, /clear, /join <link>" });
+        if (txt === "/clear") { targetNumbers.clear(); await backupDatabase(); await msg.reply({ message: "DB wiped." }); }
         
         if (txt.startsWith("/join ")) {
             try {
@@ -156,7 +145,7 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
             try {
                 const res = await clientA.invoke(new Api.messages.SearchGlobal({
                     q: q.slice(-4), filter: new Api.InputMessagesFilterEmpty(),
-                    minDate: Math.floor(Date.now()/1000)-1800, limit: 50
+                    minDate: Math.floor(Date.now()/1000)-1800, limit: 50, maxDate: 0, offsetRate: 0, offsetPeer: new Api.InputPeerEmpty(), offsetId: 0, folderId: 0
                 }));
                 let found = false;
                 if (res.messages) {
@@ -169,7 +158,7 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
                     }
                 }
                 if (!found) {
-                    await msg.reply({ message: "Listening for 2 mins..." });
+                    await msg.reply({ message: "Listening live for 2 mins..." });
                     const timer = setTimeout(() => {
                         if (pendingSearches.has(q)) { pendingSearches.delete(q); clientA.sendMessage(chatId, { message: `Timeout: ${q}` }); }
                     }, 120000);
@@ -183,13 +172,8 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
             if (reply && reply.media) {
                 const buf = await clientA.downloadMedia(reply, {});
                 const nums = extractNumbers(buf.toString('utf8'));
-                if (txt === "/save") {
-                    nums.forEach(n => targetNumbers.add(n));
-                    await msg.reply({ message: `Added ${nums.length}. Total: ${targetNumbers.size}` });
-                } else {
-                    nums.forEach(n => targetNumbers.delete(n));
-                    await msg.reply({ message: `Removed ${nums.length}.` });
-                }
+                if (txt === "/save") { nums.forEach(n => targetNumbers.add(n)); await msg.reply({ message: `Added ${nums.length}. Total: ${targetNumbers.size}` }); }
+                else { nums.forEach(n => targetNumbers.delete(n)); await msg.reply({ message: `Removed ${nums.length}.` }); }
                 await backupDatabase();
             }
         }
@@ -201,73 +185,60 @@ let ghostMode = true; // For Client B (Default: ON = Don't mark read)
 //  CORE 2: CLIENT B (THE GHOST)
 // ============================================================================
 (async () => {
-    if (!process.env.SESSION_STRING_B) {
-        console.log("⚠️ Client B (Ghost) skipped: No SESSION_STRING_B found.");
-        return;
-    }
+    if (!process.env.SESSION_STRING_B) return console.log("Skipping Client B");
 
     const clientB = new TelegramClient(sessionB, apiId, apiHash, { connectionRetries: 5 });
     await clientB.start({ onError: (err) => console.log("Client B Error:", err) });
-    console.log("✅ Client B (Ghost) Online");
+    console.log("✅ Ghost (B) Online");
 
-    // --- GHOST / ONLINE LOGIC ---
+    // --- STATUS MANAGER ---
+    async function keepOnline() {
+        try {
+            // Force 'True' online status (active presence)
+            await clientB.invoke(new Api.account.UpdateStatus({ offline: false }));
+        } catch (e) { console.error("Online Error:", e); }
+    }
+
     clientB.addEventHandler(async (event) => {
         const msg = event.message;
         const sender = msg.senderId ? Number(msg.senderId) : null;
         const txt = msg.text || "";
 
-        // 1. AUTO-READ LOGIC (If Ghost Mode is OFF, mark everything read)
+        // GHOST MODE: 
+        // If this handler does NOT verify 'markAsRead', the sender sees 1 tick.
+        // If you open the chat on your phone, your PHONE sends 'read', causing 2 ticks.
+        // To verify this works: Check 'Saved Messages' for forwarded logs (if you add forwarding).
+        
         if (!ghostMode && msg.incoming) {
-            try {
-                await clientB.markAsRead(msg.chatId);
-            } catch (e) {}
+            try { await clientB.markAsRead(msg.chatId); } catch (e) {}
         }
 
-        // 2. COMMANDS (Only Owner or Allowed Users)
         if (!msg.out && !allowedUsers.includes(sender)) return;
 
-        if (txt === "/start") {
-            await msg.reply({ 
-                message: "👻 GHOST SYSTEM\n\n" +
-                         "/online on - Stay Online Forever\n" +
-                         "/online off - Normal Status\n" +
-                         "/ghost on - Don't mark read (Stealth)\n" +
-                         "/ghost off - Auto mark read (Active)"
-            });
-        }
+        if (txt === "/start") await msg.reply({ message: "GHOST ONLINE\n/online on/off\n/ghost on/off" });
 
-        // --- ONLINE TOGGLE ---
         if (txt === "/online on") {
             if (onlineInterval) clearInterval(onlineInterval);
-            // Send 'Online' status every 3 minutes
-            onlineInterval = setInterval(async () => {
-                try {
-                    await clientB.invoke(new Api.account.UpdateStatus({ offline: false }));
-                } catch (e) { console.error("Online Ping Error:", e); }
-            }, 180000); // 3 minutes
-            
-            await clientB.invoke(new Api.account.UpdateStatus({ offline: false }));
-            await msg.reply({ message: "🟢 **Always Online** ACTIVATED." });
+            // Ping every 60 seconds to be aggressive
+            onlineInterval = setInterval(keepOnline, 60000); 
+            await keepOnline();
+            await msg.reply({ message: "🟢 Always Online: ACTIVE" });
         }
 
         if (txt === "/online off") {
-            if (onlineInterval) {
-                clearInterval(onlineInterval);
-                onlineInterval = null;
-            }
+            if (onlineInterval) { clearInterval(onlineInterval); onlineInterval = null; }
             await clientB.invoke(new Api.account.UpdateStatus({ offline: true }));
-            await msg.reply({ message: "🔴 **Always Online** DEACTIVATED." });
+            await msg.reply({ message: "🔴 Always Online: OFF" });
         }
 
-        // --- GHOST TOGGLE ---
         if (txt === "/ghost on") {
             ghostMode = true;
-            await msg.reply({ message: "👻 **Ghost Mode** ON. (I will not mark messages as read)" });
+            await msg.reply({ message: "👻 Ghost Mode: ON (I won't mark as read)" });
         }
 
         if (txt === "/ghost off") {
             ghostMode = false;
-            await msg.reply({ message: "👀 **Ghost Mode** OFF. (I will auto-read incoming messages)" });
+            await msg.reply({ message: "👀 Ghost Mode: OFF (Auto-Reading)" });
         }
 
     }, new NewMessage({ incoming: true, outgoing: true }));
