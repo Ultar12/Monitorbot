@@ -7,7 +7,7 @@ const express = require('express');
 // --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System V15 (Strict Filter + BroadNet Search)'));
+app.get('/', (req, res) => res.send('System V16 Operational'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 // --- CONFIG ---
@@ -38,7 +38,6 @@ let ghostMode = true;
     await clientA.start({ onError: (err) => console.log(err) });
     console.log("✅ Hunter (A) Online");
 
-    // Keep Alive
     setInterval(() => { clientA.getMe().catch(() => {}); }, 30000);
 
     // --- DATABASE ---
@@ -103,9 +102,7 @@ let ghostMode = true;
         
         // 1. AUTO-RESPONDER (STRICT MODE)
         if (responseFilters.size > 0 && !message.out) {
-            // Trim and Lowercase for exact match check
             const cleanText = text.trim().toLowerCase();
-            
             for (const [trigger, response] of responseFilters) {
                 if (cleanText === trigger.toLowerCase()) {
                     try { await message.reply({ message: response }); return; } catch (e) {}
@@ -119,8 +116,6 @@ let ghostMode = true;
             if (message.replyMarkup?.rows) message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if(b.text) fullText+=" "+b.text }));
 
             for (const num of targetNumbers) {
-                // We check if the text contains a masked version of our number
-                // This is hard to do efficiently, so we stick to checking suffixes/prefixes
                 const suffix = num.slice(-4);
                 if (fullText.includes(suffix)) { 
                     const otp = findOTP(fullText);
@@ -140,9 +135,7 @@ let ghostMode = true;
         if (event.message.replyMarkup?.rows) event.message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if(b.text) fullText+=" "+b.text }));
 
         for (const [suffix, info] of pendingSearches) {
-            // Check if suffix matches
             if (fullText.includes(suffix)) {
-                // Verify strict structure match
                 const maskedNum = findMaskedNumber(fullText);
                 if (maskedNum && isMatch(info.fullNumber, maskedNum)) {
                     const otp = findOTP(fullText);
@@ -166,7 +159,7 @@ let ghostMode = true;
 
         try {
             if (txt === "/ping") await msg.reply({ message: "🥷 **Hunter (A):** ALIVE" });
-            if (txt === "/start") await msg.reply({ message: "HUNTER V15 READY" });
+            if (txt === "/start") await msg.reply({ message: "HUNTER V16 READY" });
 
             // FILTER
             if (txt.startsWith("/filter ")) {
@@ -179,10 +172,26 @@ let ghostMode = true;
                 await msg.reply({ message: `✅ Filter (Strict): "${trigger}"` });
             }
 
+            // STOP FILTER (FIXED)
             if (txt.startsWith("/stop ")) {
-                const trig = txt.substring(6).trim();
-                if (responseFilters.delete(trig)) { await backupDatabase(); await msg.reply({ message: "Deleted." }); } 
-                else { await msg.reply({ message: "Not found." }); }
+                const trigger = txt.substring(6).trim();
+                let found = false;
+                
+                // Case-insensitive deletion check
+                for (const [key, val] of responseFilters) {
+                    if (key.toLowerCase() === trigger.toLowerCase()) {
+                        responseFilters.delete(key);
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (found) {
+                    await backupDatabase();
+                    await msg.reply({ message: `🗑 Filter Deleted: "${trigger}"` });
+                } else {
+                    await msg.reply({ message: "❌ Filter not found." });
+                }
             }
 
             if (txt === "/filters") {
@@ -199,7 +208,6 @@ let ghostMode = true;
                 await msg.reply({ message: "Joined." });
             }
 
-            // --- BROADNET SEARCH (THE FIX) ---
             if (txt.startsWith("/s ")) {
                 const rawQuery = txt.split(" ")[1];
                 if (!rawQuery) return await msg.reply({ message: "Use: /s 5870" });
@@ -209,13 +217,11 @@ let ghostMode = true;
 
                 await msg.reply({ message: `📡 BroadNet Scanning for *${suffix}*...`, parseMode: 'markdown' });
 
-                // STRATEGY: Search "OTP" globally, then filter results locally.
-                // This bypasses Telegram failing to index numbers/asterisks.
                 const res = await clientA.invoke(new Api.messages.SearchGlobal({
-                    q: "OTP", // Search for KEYWORD instead of number
+                    q: "OTP", 
                     filter: new Api.InputMessagesFilterEmpty(),
                     minDate: 0, 
-                    limit: 100, // Fetch last 100 OTP messages
+                    limit: 100, 
                     offsetRate: 0, offsetPeer: new Api.InputPeerEmpty(), offsetId: 0, folderId: 0, maxDate: 0
                 }));
 
@@ -225,9 +231,7 @@ let ghostMode = true;
                         let fText = m.message || "";
                         if (m.replyMarkup?.rows) m.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if(b.text) fText+=" "+b.text }));
                         
-                        // Check if this OTP message belongs to our number
                         if (fText.includes(suffix)) {
-                            // Extract Masked Number to be sure
                             const maskedNum = findMaskedNumber(fText);
                             if (maskedNum && isMatch(cleanQuery, maskedNum)) {
                                 const otp = findOTP(fText);
@@ -289,8 +293,8 @@ let ghostMode = true;
         const txt = msg.text || "";
         const sender = msg.senderId ? Number(msg.senderId) : null;
 
-        // 1. AUTO-RESPONDER (STRICT MODE for Client B too)
-        if (responseFilters.size > 0 && !msg.out) { // Don't reply to self
+        // 1. AUTO-RESPONDER (STRICT MODE)
+        if (responseFilters.size > 0 && !msg.out) { 
             const cleanText = txt.trim().toLowerCase();
             for (const [trigger, response] of responseFilters) {
                 if (cleanText === trigger.toLowerCase()) {
@@ -304,17 +308,31 @@ let ghostMode = true;
         if (!msg.out && !allowedUsers.includes(sender)) return;
 
         if (txt === "/ping") await msg.reply({ message: "👻 **Ghost (B):** ALIVE" });
-        if (txt === "/start") await msg.reply({ message: "GHOST V15 ONLINE" });
+        if (txt === "/start") await msg.reply({ message: "GHOST V16 ONLINE" });
 
-        // Filter Config (Redundant but keeps DB synced if you use B)
+        // Filter Config (Keeps both clients synced)
         if (txt.startsWith("/filter ")) {
             if (!txt.includes(',')) return await msg.reply({ message: "Error: Missing comma." });
             const firstComma = txt.indexOf(',');
             const trigger = txt.substring(8, firstComma).trim();
             const response = txt.substring(firstComma + 1).trim();
             responseFilters.set(trigger, response);
-            // Note: B updates A's DB reference in memory if same process, but saving to file via A logic
+            // Saves are handled by Client A's loop, but B updates memory
             await msg.reply({ message: `✅ Filter (Strict): "${trigger}"` });
+        }
+
+        if (txt.startsWith("/stop ")) {
+            const trigger = txt.substring(6).trim();
+            let found = false;
+            for (const [key, val] of responseFilters) {
+                if (key.toLowerCase() === trigger.toLowerCase()) {
+                    responseFilters.delete(key);
+                    found = true;
+                    break;
+                }
+            }
+            if (found) await msg.reply({ message: `🗑 Deleted: "${trigger}"` });
+            else await msg.reply({ message: "Not found." });
         }
 
         if (txt === "/online on") { if (onlineInterval) clearInterval(onlineInterval); onlineInterval = setInterval(keepOnline, 60000); await keepOnline(); await msg.reply({ message: "🟢 ON" }); }
