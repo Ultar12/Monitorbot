@@ -7,7 +7,7 @@ const express = require('express');
 // --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System V18 (Isolated Start)'));
+app.get('/', (req, res) => res.send('System V18 (Isolation Mode)'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 // --- CONFIG ---
@@ -15,51 +15,67 @@ const apiId = 34884606;
 const apiHash = "4148aa2a18ccfd60018b1ab06cd09d96";
 const adminId = process.env.ADMIN_ID; 
 
+// --- CRITICAL SESSION CHECK ---
 const stringA = process.env.SESSION_STRING;
 const stringB = process.env.SESSION_STRING_B;
 
-// DEBUG: Print first 5 chars of sessions to prove they are different
-console.log(`[INIT] Session A starts with: ${stringA ? stringA.substring(0, 5) : 'MISSING'}`);
-console.log(`[INIT] Session B starts with: ${stringB ? stringB.substring(0, 5) : 'MISSING'}`);
-
-if (stringA === stringB) {
-    console.error("❌ CRITICAL: Sessions are IDENTICAL. Aborting Client B.");
+if (!stringA) {
+    console.error("❌ FATAL: SESSION_STRING (Hunter) is missing.");
     process.exit(1);
 }
 
+// Safety check: Are they the same?
+let enableGhost = true;
+if (stringA === stringB) {
+    console.error("⚠️ WARNING: SESSION_STRING and SESSION_STRING_B are IDENTICAL.");
+    console.error("⚠️ Disabling Ghost (Client B) to prevent crash.");
+    enableGhost = false;
+}
+
 const sessionA = new StringSession(stringA); 
-const sessionB = new StringSession(stringB); 
+const sessionB = enableGhost ? new StringSession(stringB) : null; 
 
 const allowedUsersRaw = process.env.ALLOWED_USERS || "";
 const allowedUsers = allowedUsersRaw.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 
-// --- GLOBAL VARS ---
+// --- GLOBAL VARIABLES ---
 let targetNumbers = new Set(); 
 let responseFilters = new Map(); 
 let pendingSearches = new Map(); 
 let onlineInterval = null; 
 let ghostMode = true; 
 
-// --- ERROR HANDLER ---
-process.on('uncaughtException', (err) => console.error('🔥 EXCEPTION:', err.message));
-process.on('unhandledRejection', (reason) => console.error('🔥 REJECTION:', reason));
+// --- ANTI-CRASH HANDLERS ---
+process.on('uncaughtException', (err) => {
+    console.error('🔥 CRITICAL ERROR:', err.message);
+    // Do NOT exit. Keep server alive.
+});
+process.on('unhandledRejection', (reason) => {
+    console.error('🔥 UNHANDLED PROMISE:', reason);
+});
 
 // ============================================================================
 //  CORE 1: CLIENT A (HUNTER)
 // ============================================================================
 async function startHunter() {
-    if (!stringA) return console.log("Skipping Hunter (No Session)");
-
-    console.log("🚀 Starting Hunter...");
+    console.log("🚀 Initializing Hunter...");
     const clientA = new TelegramClient(sessionA, apiId, apiHash, { 
         connectionRetries: 5, 
         useWSS: false,
-        deviceModel: "HunterBot V18", // Unique device name
-        appVersion: "1.0.0" 
+        deviceModel: "HunterBot V18", // Unique ID
+        appVersion: "1.0.0"
     });
     
-    await clientA.start({ onError: (err) => console.log("Hunter Error:", err) });
-    console.log("✅ Hunter (A) Connected & Ready");
+    try {
+        await clientA.start({ onError: (err) => console.log("Hunter Login Error:", err) });
+        console.log("✅ Hunter (A) Connected Successfully");
+    } catch (e) {
+        console.log("❌ Hunter Failed:", e.message);
+        return; // Stop Hunter if auth fails
+    }
+
+    // Keep Alive
+    setInterval(() => { clientA.getMe().catch(() => {}); }, 30000);
 
     // --- DATABASE ---
     async function backupDatabase() {
@@ -281,20 +297,25 @@ async function startHunter() {
 //  CORE 2: CLIENT B (GHOST)
 // ============================================================================
 async function startGhost() {
-    if (!stringB) return console.log("Skipping Ghost (No Session)");
+    if (!enableGhost || !stringB) return console.log("Skipping Ghost (Disabled or Missing)");
 
-    console.log("👻 Starting Ghost (Delay 5s)...");
-    await new Promise(r => setTimeout(r, 5000)); // STAGGERED START
+    console.log("👻 Initializing Ghost (10s Delay)...");
+    await new Promise(resolve => setTimeout(resolve, 10000)); // 10 SECOND SAFETY DELAY
 
     const clientB = new TelegramClient(sessionB, apiId, apiHash, { 
         connectionRetries: 5, 
         useWSS: false,
-        deviceModel: "GhostBot V18", // Different device ID
+        deviceModel: "GhostBot V18", // Unique ID
         appVersion: "1.0.0" 
     });
     
-    await clientB.start({ onError: (err) => console.log("Ghost Error:", err) });
-    console.log("✅ Ghost (B) Connected & Ready");
+    try {
+        await clientB.start({ onError: (err) => console.log("Ghost Login Error:", err) });
+        console.log("✅ Ghost (B) Connected Successfully");
+    } catch (e) {
+        console.log("❌ Ghost Failed:", e.message);
+        return;
+    }
 
     async function keepOnline() { try { await clientB.invoke(new Api.account.UpdateStatus({ offline: false })); } catch (e) {} }
 
@@ -340,6 +361,8 @@ async function startGhost() {
 
 // --- BOOT SEQUENCE ---
 (async () => {
+    // Start Hunter immediately
     await startHunter();
+    // Start Ghost after 10 seconds (handled inside function)
     await startGhost();
 })();
