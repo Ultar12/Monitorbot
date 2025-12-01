@@ -23,9 +23,9 @@ const allowedUsers = allowedUsersRaw.split(',')
 
 // STORAGE
 let targetNumbers = new Set(); 
-let pendingSearches = new Map(); // Store active searches: Key=RealNumber, Value={chatId, timer}
+let pendingSearches = new Map(); // Key=RealNumber, Value={chatId, timer}
 
-// --- 3. DATABASE FUNCTIONS ---
+// --- 3. DATABASE ---
 async function backupDatabase(client) {
     try {
         const data = JSON.stringify([...targetNumbers], null, 2);
@@ -57,7 +57,7 @@ async function restoreDatabase(client) {
     }
 }
 
-// --- 4. PARSING & MATCHING ---
+// --- 4. PARSING ---
 function extractNumbersFromText(textContent) {
     const regex = /(?:\+|)\d{7,15}/g;
     const matches = textContent.match(regex);
@@ -67,18 +67,12 @@ function extractNumbersFromText(textContent) {
 
 function isMaskedMatch(realNumber, maskedNumber) {
     const cleanMasked = maskedNumber.replace(/[^0-9*]/g, ''); 
-    
-    // Direct match
     if (realNumber === cleanMasked) return true;
-
-    // Masked match (e.g. 234***567)
     if (cleanMasked.includes('*')) {
         const parts = cleanMasked.split('*').filter(p => p.length > 0);
         if (parts.length < 1) return false;
-
         const prefix = parts[0];
         const suffix = parts[parts.length - 1];
-
         return realNumber.startsWith(prefix) && realNumber.endsWith(suffix);
     }
     return false;
@@ -86,10 +80,7 @@ function isMaskedMatch(realNumber, maskedNumber) {
 
 function parseMessageForOtp(text) {
     if (!text || text.length < 5) return null;
-
-    // Regex for OTP (123-456 or 123456)
     const otpRegex = /(?:\b\d{3}[-\s]\d{3}\b|\b\d{6}\b)/;
-    // Regex for Masked/Full Number
     const numRegex = /([0-9]+\*+[0-9]+)/;
 
     const otpMatch = text.match(otpRegex);
@@ -120,7 +111,7 @@ function parseMessageForOtp(text) {
     
     await restoreDatabase(client);
 
-    // --- MONITORING (PASSIVE & ACTIVE) ---
+    // --- MONITORING ---
     client.addEventHandler(async (event) => {
         const message = event.message;
         const text = message.text || "";
@@ -128,29 +119,23 @@ function parseMessageForOtp(text) {
         const data = parseMessageForOtp(text);
         
         if (data) {
-            // 1. CHECK PENDING SEARCHES (Active Hunting)
-            // We check this first to auto-complete any /s commands
+            // 1. ACTIVE SEARCH CHECK
             for (const [realNum, searchInfo] of pendingSearches) {
                 if (isMaskedMatch(realNum, data.number)) {
-                    // STOP SEARCH
                     clearTimeout(searchInfo.timer);
                     pendingSearches.delete(realNum);
-
-                    // NOTIFY
                     await client.sendMessage(searchInfo.chatId, { 
-                        message: `[FOUND] Live Match\n` +
-                                 `Source: ${data.number}\n` +
-                                 `OTP Below:`
+                        message: `[FOUND] Live Match\nSource: ${data.number}\nOTP Below:`
                     });
                     await client.sendMessage(searchInfo.chatId, { 
                         message: `\`${data.otp}\``,
                         parseMode: "markdown"
                     });
-                    return; // Stop here if it was a pending search
+                    return; 
                 }
             }
 
-            // 2. CHECK DATABASE (Passive Monitoring)
+            // 2. PASSIVE DATABASE CHECK
             let foundRealNumber = null;
             for (const myNum of targetNumbers) {
                 if (isMaskedMatch(myNum, data.number)) {
@@ -162,10 +147,7 @@ function parseMessageForOtp(text) {
             if (foundRealNumber) {
                 if (adminId) {
                     await client.sendMessage(adminId, { 
-                        message: `[ALERT] Database Match\n` +
-                                 `Real: ${foundRealNumber}\n` +
-                                 `Masked: ${data.number}\n` +
-                                 `OTP Below:`
+                        message: `[ALERT] Database Match\nReal: ${foundRealNumber}\nMasked: ${data.number}\nOTP Below:`
                     });
                     await client.sendMessage(adminId, { 
                         message: `\`${data.otp}\``,
@@ -191,18 +173,11 @@ function parseMessageForOtp(text) {
         // /start
         if (text === "/start") {
             await message.reply({ 
-                message: "SYSTEM ONLINE\n\n" +
-                         "COMMANDS:\n" +
-                         "/save - Reply to file to add numbers\n" +
-                         "/delete - Reply to file to remove\n" +
-                         "/clear - Wipe all numbers\n" +
-                         "/s <number> - Deep Search (History + Live)\n" +
-                         "/join <link> - Join group\n\n" +
-                         `Storage: ${targetNumbers.size} numbers`
+                message: "SYSTEM ONLINE\n\nCOMMANDS:\n/save - Add from file\n/delete - Remove from file\n/clear - Wipe DB\n/s <number> - Search (History + Live)\n/join <link> - Join group"
             });
         }
 
-        // /s (DEEP SEARCH)
+        // /s (DEEP SEARCH - FIXED)
         if (text.startsWith("/s ")) {
             const queryNum = text.split(" ")[1];
             if (!queryNum) return await message.reply({ message: "[ERROR] Format: /s 23480..." });
@@ -210,18 +185,25 @@ function parseMessageForOtp(text) {
             const cleanQueryNum = queryNum.replace(/\D/g, '');
             const chatId = message.chatId;
 
-            await message.reply({ message: `[SEARCHING] Checking last 30 mins history for ${cleanQueryNum}...` });
+            await message.reply({ message: `[SEARCHING] Checking history...` });
 
             try {
-                // 1. SEARCH HISTORY (Last 30 mins)
-                const suffix = cleanQueryNum.slice(-4);
+                // FIXED: Now we provide EVERY SINGLE PARAMETER required by GramJS
                 const thirtyMinsAgo = Math.floor(Date.now() / 1000) - 1800;
+                
+                // We search for just the last 4 digits to find potential matches
+                const suffix = cleanQueryNum.slice(-4);
 
                 const result = await client.invoke(new Api.messages.SearchGlobal({
                     q: suffix,
                     filter: new Api.InputMessagesFilterEmpty(),
-                    minDate: thirtyMinsAgo, 
-                    limit: 50 
+                    minDate: thirtyMinsAgo,
+                    maxDate: 0,              // Was missing
+                    offsetRate: 0,           // Was missing
+                    offsetPeer: new Api.InputPeerEmpty(), // Was missing
+                    offsetId: 0,             // Was missing
+                    limit: 50,
+                    folderId: 0              // Optional but good to be explicit
                 }));
 
                 let found = false;
@@ -239,33 +221,31 @@ function parseMessageForOtp(text) {
                     }
                 }
 
-                if (found) return; // Stop if found in history
+                if (found) return; 
 
-                // 2. ACTIVATE LISTENER (Not found in history)
+                // If not found, start listening
                 await message.reply({ message: `[WAITING] Not in history. Listening live for 2 minutes...` });
 
-                // Set Timer to stop listening after 2 mins
                 const timer = setTimeout(async () => {
                     if (pendingSearches.has(cleanQueryNum)) {
                         pendingSearches.delete(cleanQueryNum);
-                        await client.sendMessage(chatId, { message: `[TIMEOUT] Search ended for ${cleanQueryNum}. No OTP found.` });
+                        await client.sendMessage(chatId, { message: `[TIMEOUT] No OTP found for ${cleanQueryNum}.` });
                     }
-                }, 120000); // 120 seconds
+                }, 120000); 
 
-                // Add to Map
                 pendingSearches.set(cleanQueryNum, { chatId, timer });
 
             } catch (e) {
+                console.error(e);
                 await message.reply({ message: "[ERROR] Search failed: " + e.message });
             }
         }
 
         // /clear
         if (text === "/clear") {
-            const count = targetNumbers.size;
             targetNumbers.clear();
             await backupDatabase(client);
-            await message.reply({ message: `[DONE] Database wiped. Removed ${count} numbers.` });
+            await message.reply({ message: `[DONE] Database wiped.` });
         }
 
         // /join
@@ -276,7 +256,7 @@ function parseMessageForOtp(text) {
                 await client.invoke(new Api.messages.ImportChatInvite({ hash: hash }));
                 await message.reply({ message: "[SUCCESS] Joined." });
             } catch (e) {
-                await message.reply({ message: "[FAIL] " + (e.errorMessage || e.message) });
+                await message.reply({ message: "[FAIL] " + e.message });
             }
         }
 
@@ -284,7 +264,7 @@ function parseMessageForOtp(text) {
         if (text === "/save" && message.isReply) {
             const replyMsg = await message.getReplyMessage();
             if (replyMsg && replyMsg.media) {
-                await message.reply({ message: "[PROCESSING] Reading..." });
+                await message.reply({ message: "[PROCESSING]..." });
                 try {
                     const buffer = await client.downloadMedia(replyMsg, {});
                     const newNumbers = extractNumbersFromText(buffer.toString('utf8'));
@@ -303,10 +283,9 @@ function parseMessageForOtp(text) {
             if (replyMsg && replyMsg.media) {
                 const buffer = await client.downloadMedia(replyMsg, {});
                 const delNums = extractNumbersFromText(buffer.toString('utf8'));
-                const before = targetNumbers.size;
                 delNums.forEach(n => targetNumbers.delete(n));
                 await backupDatabase(client);
-                await message.reply({ message: `[DONE] Removed: ${before - targetNumbers.size}` });
+                await message.reply({ message: `[DONE] Removed numbers.` });
             }
         }
 
