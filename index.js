@@ -4,11 +4,13 @@ const { StringSession } = require("telegram/sessions");
 const { NewMessage } = require("telegram/events");
 const express = require('express');
 
+// --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System V10 Active'));
+app.get('/', (req, res) => res.send('System V11 (Heartbeat Active)'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
+// --- CONFIG ---
 const apiId = 34884606; 
 const apiHash = "4148aa2a18ccfd60018b1ab06cd09d96";
 const adminId = process.env.ADMIN_ID; 
@@ -31,9 +33,18 @@ let ghostMode = true;
 (async () => {
     if (!process.env.SESSION_STRING) return console.log("Skipping Client A");
 
-    const clientA = new TelegramClient(sessionA, apiId, apiHash, { connectionRetries: 5 });
-    await clientA.start({ onError: (err) => console.log(err) });
+    const clientA = new TelegramClient(sessionA, apiId, apiHash, { 
+        connectionRetries: 10, 
+        useWSS: false // Force TCP for stability on Render
+    });
+    
+    await clientA.start({ onError: (err) => console.log("Client A Error:", err) });
     console.log("✅ Hunter Online");
+
+    // --- HEARTBEAT (Prevent Disconnects) ---
+    setInterval(() => {
+        clientA.getMe().catch(e => console.log("Heartbeat A failed (reconnecting...)"));
+    }, 30000); // Ping every 30 seconds
 
     // --- DATABASE ---
     async function backupDatabase() {
@@ -46,6 +57,7 @@ let ghostMode = true;
             const buffer = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
             buffer.name = "database_backup.json"; 
             await clientA.sendMessage("me", { message: "DB_BACKUP_DO_NOT_DELETE", file: buffer, forceDocument: true });
+            console.log(`[BACKUP] Saved. Filters: ${responseFilters.size}`);
         } catch (e) { console.error("Backup Fail:", e); }
     }
 
@@ -57,7 +69,7 @@ let ghostMode = true;
                 const rawData = JSON.parse(buffer.toString('utf8'));
                 if (rawData.numbers) targetNumbers = new Set(rawData.numbers);
                 if (rawData.filters) Object.entries(rawData.filters).forEach(([k, v]) => responseFilters.set(k, v));
-                console.log(`Loaded ${targetNumbers.size} nums, ${responseFilters.size} filters.`);
+                console.log(`[RESTORE] Loaded ${targetNumbers.size} numbers, ${responseFilters.size} filters.`);
             }
         } catch (e) { console.error("Restore Fail:", e); }
     }
@@ -80,12 +92,18 @@ let ghostMode = true;
         const message = event.message;
         const text = message.text || "";
         
-        // 1. AUTO-RESPONDER (Check trigger first)
+        // 1. AUTO-RESPONDER
         if (responseFilters.size > 0) {
             for (const [trigger, response] of responseFilters) {
                 if (text.toLowerCase().includes(trigger.toLowerCase())) {
-                    if (text === response) continue; // Loop protection
-                    try { await message.reply({ message: response }); return; } catch (e) {}
+                    // Prevent loops (don't reply to self if text equals response)
+                    if (message.out && text === response) continue; 
+                    
+                    try { 
+                        await message.reply({ message: response }); 
+                        console.log(`[FILTER] Responded to: ${trigger}`);
+                        return; 
+                    } catch (e) {}
                 }
             }
         }
@@ -113,12 +131,10 @@ let ghostMode = true;
     // --- GLOBAL LISTENER (Active Search) ---
     clientA.addEventHandler(async (event) => {
         if (pendingSearches.size === 0) return;
-        
         let fullText = event.message.text || "";
         if (event.message.replyMarkup?.rows) {
             event.message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if (b.text) fullText += " " + b.text; }));
         }
-
         for (const [suffix, info] of pendingSearches) {
             if (fullText.includes(suffix)) {
                 const otp = findOTP(fullText);
@@ -137,23 +153,29 @@ let ghostMode = true;
         const msg = event.message;
         const sender = msg.senderId ? Number(msg.senderId) : null;
         
-        // Authorization Check
+        // Check Auth
         if (!msg.out && !allowedUsers.includes(sender)) return;
 
         const txt = msg.text || "";
 
         try {
-            if (txt === "/start") await msg.reply({ message: "HUNTER V10 READY" });
+            // DEBUG LOG: See what commands reach the bot
+            if (txt.startsWith("/")) console.log(`[CMD] Received: ${txt.split('\n')[0]}...`);
+
+            if (txt === "/start") await msg.reply({ message: "HUNTER V11 READY" });
 
             // FILTER
             if (txt.startsWith("/filter ")) {
                 if (!txt.includes(',')) return await msg.reply({ message: "Error: Missing comma.\nUse: /filter Word, Reply" });
-                const args = txt.substring(8).split(',');
-                const trig = args[0].trim();
-                const resp = args.slice(1).join(',').trim();
-                responseFilters.set(trig, resp);
+                
+                // Handle multi-line responses correctly
+                const firstCommaIndex = txt.indexOf(',');
+                const trigger = txt.substring(8, firstCommaIndex).trim(); // Text between "/filter " and ","
+                const response = txt.substring(firstCommaIndex + 1).trim(); // Everything after ","
+                
+                responseFilters.set(trigger, response);
                 await backupDatabase();
-                await msg.reply({ message: `Saved Filter: "${trig}"` });
+                await msg.reply({ message: `✅ Saved Filter: "${trigger}"` });
             }
 
             if (txt.startsWith("/stop ")) {
@@ -167,9 +189,9 @@ let ghostMode = true;
             }
 
             if (txt === "/filters") {
-                let list = "Filters:\n";
-                responseFilters.forEach((v, k) => list += `• ${k} -> ${v}\n`);
-                await msg.reply({ message: list });
+                let list = "**Filters:**\n";
+                responseFilters.forEach((v, k) => list += `• \`${k}\`\n`);
+                await msg.reply({ message: list, parseMode: "markdown" });
             }
 
             // DB
@@ -190,7 +212,6 @@ let ghostMode = true;
 
                 await msg.reply({ message: `Searching *${suffix}*...`, parseMode: 'markdown' });
 
-                // 1. History
                 const res = await clientA.invoke(new Api.messages.SearchGlobal({
                     q: suffix, filter: new Api.InputMessagesFilterEmpty(),
                     minDate: Math.floor(Date.now()/1000) - 900, limit: 50,
@@ -225,7 +246,6 @@ let ghostMode = true;
                 }
             }
 
-            // SAVE/DELETE
             if ((txt === "/save" || txt === "/delete") && msg.isReply) {
                 const reply = await msg.getReplyMessage();
                 if (reply && reply.media) {
@@ -252,9 +272,13 @@ let ghostMode = true;
 (async () => {
     if (!process.env.SESSION_STRING_B) return console.log("Skipping Client B");
 
-    const clientB = new TelegramClient(sessionB, apiId, apiHash, { connectionRetries: 5 });
+    const clientB = new TelegramClient(sessionB, apiId, apiHash, { connectionRetries: 10, useWSS: false });
     await clientB.start({ onError: (err) => console.log("Client B Error:", err) });
     console.log("✅ Ghost Online");
+
+    setInterval(() => {
+        clientB.getMe().catch(e => console.log("Heartbeat B failed"));
+    }, 30000);
 
     async function keepOnline() { try { await clientB.invoke(new Api.account.UpdateStatus({ offline: false })); } catch (e) {} }
 
