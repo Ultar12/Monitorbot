@@ -56,7 +56,7 @@ async function restoreDatabase(client) {
     }
 }
 
-// --- 4. PARSING LOGIC ---
+// --- 4. PARSING LOGIC (AGGRESSIVE) ---
 
 function extractNumbersFromText(textContent) {
     const regex = /(?:\+|)\d{7,15}/g;
@@ -65,10 +65,12 @@ function extractNumbersFromText(textContent) {
     return matches.map(num => num.replace(/\+/g, ''));
 }
 
-// Helper to handle weird unicode asterisks
+// Helper to handle ALL weird unicode asterisks
 function normalizeMask(input) {
-    // Replaces ⁕ (U+2055), ⁎ (U+204E), ∗ (U+2217), • (U+2022) with standard *
-    return input.replace(/[\u2055\u204E\u2217\u2022]/g, '*');
+    // Replaces: 
+    // ⁕ (U+2055), ⁎ (U+204E), ∗ (U+2217), • (U+2022), ● (U+25CF)
+    // with standard *
+    return input.replace(/[\u2055\u204E\u2217\u2022\u25CF]/g, '*');
 }
 
 function isMaskedMatch(realNumber, maskedNumber) {
@@ -110,21 +112,24 @@ function parseMessageFull(message) {
 
     if (combinedText.length < 5) return null;
 
-    // --- UPDATED REGEX ---
+    // --- AGGRESSIVE REGEX UPGRADE ---
     
-    // 1. Find OTP: Matches "437-317" or "366 113" or "123456"
-    const otpRegex = /(?:\b\d{3}[-\s]\d{3}\b|\b\d{6}\b)/;
+    // 1. Find OTP: Matches 3-3 digits (123-456) OR 6 digits (123456)
+    // We now allow surrounding spaces or newlines to ensure we catch it
+    const otpRegex = /(?:^|\s|\n|:|-)([\d]{3}[-\s]?[\d]{3})(?:$|\s|\n)/;
     
-    // 2. Find Number: Matches digits + any type of asterisk/dot + digits
-    // Handles: 23470****9145 AND 23470⁕⁕⁕⁕9145
-    const numRegex = /([0-9]+[*\u2055\u204E\u2217\u2022]+[0-9]+)/;
+    // 2. Find Number: 
+    // Matches digits + (any * or weird dot) + digits
+    // Example: 23470⁕⁕⁕⁕5870 or 234***567
+    const numRegex = /([0-9]{3,}[\*⁕⁎∗•●]+[0-9]{3,})/;
 
     const otpMatch = combinedText.match(otpRegex);
     const numMatch = combinedText.match(numRegex);
 
     if (otpMatch && numMatch) {
+        // Return the capture group (the actual numbers/OTP)
         return {
-            otp: otpMatch[0].trim(),
+            otp: otpMatch[1].replace(/[-\s]/g, '').trim(), // Clean the OTP (123-456 -> 123456)
             number: numMatch[0].trim()
         };
     }
@@ -223,6 +228,7 @@ function parseMessageFull(message) {
 
             try {
                 const thirtyMinsAgo = Math.floor(Date.now() / 1000) - 1800;
+                // Search LAST 4 digits (e.g. 5870) to find the message
                 const suffix = cleanQueryNum.slice(-4);
                 
                 const result = await client.invoke(new Api.messages.SearchGlobal({
@@ -241,6 +247,10 @@ function parseMessageFull(message) {
                 if (result.messages) {
                     for (const msg of result.messages) {
                         const data = parseMessageFull(msg);
+                        
+                        // Debug log (Check Render logs if it fails)
+                        if (data) console.log(`[DEBUG] Found: ${data.number} | OTP: ${data.otp}`);
+
                         if (data && isMaskedMatch(cleanQueryNum, data.number)) {
                             await message.reply({ 
                                 message: `[FOUND HISTORY]\nSource: ${data.number}\nOTP: \`${data.otp}\``,
