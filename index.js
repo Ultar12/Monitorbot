@@ -7,7 +7,7 @@ const express = require('express');
 // --- 1. SERVER ---
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('System V11 (Heartbeat Active)'));
+app.get('/', (req, res) => res.send('System V13 Operational'));
 app.listen(PORT, () => console.log(`Server running on ${PORT}`));
 
 // --- CONFIG ---
@@ -21,64 +21,57 @@ const sessionB = new StringSession(process.env.SESSION_STRING_B);
 const allowedUsersRaw = process.env.ALLOWED_USERS || "";
 const allowedUsers = allowedUsersRaw.split(',').map(id => parseInt(id.trim())).filter(id => !isNaN(id));
 
-let targetNumbers = new Set(); 
-let responseFilters = new Map(); 
+// --- GLOBAL VARIABLES ---
+let targetNumbers = new Set(); // Managed by Client A
+let responseFilters = new Map(); // Managed by Client B
 let pendingSearches = new Map(); 
 let onlineInterval = null; 
 let ghostMode = true; 
 
 // ============================================================================
-//  CORE 1: CLIENT A (HUNTER)
+//  CORE 1: CLIENT A (THE HUNTER)
+//  - Tasks: OTP Monitoring, Number Database, Search, Join
 // ============================================================================
 (async () => {
     if (!process.env.SESSION_STRING) return console.log("Skipping Client A");
 
-    const clientA = new TelegramClient(sessionA, apiId, apiHash, { 
-        connectionRetries: 10, 
-        useWSS: false // Force TCP for stability on Render
-    });
+    const clientA = new TelegramClient(sessionA, apiId, apiHash, { connectionRetries: 10, useWSS: false });
     
-    await clientA.start({ onError: (err) => console.log("Client A Error:", err) });
-    console.log("✅ Hunter Online");
-
-    // --- HEARTBEAT (Prevent Disconnects) ---
-    setInterval(() => {
-        clientA.getMe().catch(e => console.log("Heartbeat A failed (reconnecting...)"));
-    }, 30000); // Ping every 30 seconds
-
-    // --- DATABASE ---
-    async function backupDatabase() {
-        try {
-            const payload = {
-                version: 3,
-                numbers: [...targetNumbers],
-                filters: Object.fromEntries(responseFilters)
-            };
-            const buffer = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
-            buffer.name = "database_backup.json"; 
-            await clientA.sendMessage("me", { message: "DB_BACKUP_DO_NOT_DELETE", file: buffer, forceDocument: true });
-            console.log(`[BACKUP] Saved. Filters: ${responseFilters.size}`);
-        } catch (e) { console.error("Backup Fail:", e); }
+    try {
+        await clientA.start({ onError: (err) => console.log("Client A Error:", err) });
+        console.log("✅ Hunter (A) Online");
+    } catch (e) {
+        console.log("❌ Client A Failed. Check Session.", e);
     }
 
-    async function restoreDatabase() {
+    setInterval(() => { clientA.getMe().catch(() => {}); }, 30000);
+
+    // --- DATABASE A (Numbers Only) ---
+    async function backupNumbers() {
         try {
-            const result = await clientA.getMessages("me", { search: "DB_BACKUP_DO_NOT_DELETE", limit: 1 });
+            const payload = { version: 1, numbers: [...targetNumbers] };
+            const buffer = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
+            buffer.name = "numbers_backup.json"; 
+            await clientA.sendMessage("me", { message: "NUM_BACKUP_DO_NOT_DELETE", file: buffer, forceDocument: true });
+        } catch (e) { console.error("Backup A Fail:", e); }
+    }
+
+    async function restoreNumbers() {
+        try {
+            const result = await clientA.getMessages("me", { search: "NUM_BACKUP_DO_NOT_DELETE", limit: 1 });
             if (result && result.length > 0 && result[0].media) {
                 const buffer = await clientA.downloadMedia(result[0], {});
                 const rawData = JSON.parse(buffer.toString('utf8'));
                 if (rawData.numbers) targetNumbers = new Set(rawData.numbers);
-                if (rawData.filters) Object.entries(rawData.filters).forEach(([k, v]) => responseFilters.set(k, v));
-                console.log(`[RESTORE] Loaded ${targetNumbers.size} numbers, ${responseFilters.size} filters.`);
+                console.log(`[A] Loaded ${targetNumbers.size} numbers.`);
             }
-        } catch (e) { console.error("Restore Fail:", e); }
+        } catch (e) { console.error("Restore A Fail:", e); }
     }
-    await restoreDatabase();
+    await restoreNumbers();
 
     // --- PARSERS ---
     function extractNumbers(text) {
-        const matches = text.match(/(?:\+|)\d{7,15}/g);
-        return matches ? matches.map(n => n.replace(/\+/g, '')) : [];
+        return (text.match(/(?:\+|)\d{7,15}/g) || []).map(n => n.replace(/\+/g, ''));
     }
 
     function findOTP(text) {
@@ -92,32 +85,12 @@ let ghostMode = true;
         const message = event.message;
         const text = message.text || "";
         
-        // 1. AUTO-RESPONDER
-        if (responseFilters.size > 0) {
-            for (const [trigger, response] of responseFilters) {
-                if (text.toLowerCase().includes(trigger.toLowerCase())) {
-                    // Prevent loops (don't reply to self if text equals response)
-                    if (message.out && text === response) continue; 
-                    
-                    try { 
-                        await message.reply({ message: response }); 
-                        console.log(`[FILTER] Responded to: ${trigger}`);
-                        return; 
-                    } catch (e) {}
-                }
-            }
-        }
-
-        // 2. PASSIVE MATCHING
         if (targetNumbers.size > 0) {
             let fullText = text;
-            if (message.replyMarkup?.rows) {
-                message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if (b.text) fullText += " " + b.text; }));
-            }
+            if (message.replyMarkup?.rows) message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if(b.text) fullText+=" "+b.text }));
 
             for (const num of targetNumbers) {
-                const suffix = num.slice(-4);
-                if (fullText.includes(suffix)) {
+                if (fullText.includes(num.slice(-4))) {
                     const otp = findOTP(fullText);
                     if (otp) {
                         if (adminId) await clientA.sendMessage(adminId, { message: `[ALERT] Match: ${num}\nOTP: \`${otp}\``, parseMode: "markdown" });
@@ -128,13 +101,12 @@ let ghostMode = true;
         }
     }, new NewMessage({ incoming: true, outgoing: true }));
 
-    // --- GLOBAL LISTENER (Active Search) ---
+    // --- ACTIVE SEARCH ---
     clientA.addEventHandler(async (event) => {
         if (pendingSearches.size === 0) return;
         let fullText = event.message.text || "";
-        if (event.message.replyMarkup?.rows) {
-            event.message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if (b.text) fullText += " " + b.text; }));
-        }
+        if (event.message.replyMarkup?.rows) event.message.replyMarkup.rows.forEach(r => r.buttons?.forEach(b => { if(b.text) fullText+=" "+b.text }));
+
         for (const [suffix, info] of pendingSearches) {
             if (fullText.includes(suffix)) {
                 const otp = findOTP(fullText);
@@ -148,74 +120,37 @@ let ghostMode = true;
         }
     }, new NewMessage({ incoming: true }));
 
-    // --- COMMANDS ---
+    // --- COMMANDS A ---
     clientA.addEventHandler(async (event) => {
         const msg = event.message;
         const sender = msg.senderId ? Number(msg.senderId) : null;
-        
-        // Check Auth
         if (!msg.out && !allowedUsers.includes(sender)) return;
-
         const txt = msg.text || "";
 
         try {
-            // DEBUG LOG: See what commands reach the bot
-            if (txt.startsWith("/")) console.log(`[CMD] Received: ${txt.split('\n')[0]}...`);
+            if (txt === "/ping") await msg.reply({ message: "🥷 **Hunter (A):** ALIVE" });
+            if (txt === "/start") await msg.reply({ message: "HUNTER V13 (OTP ONLY)" });
 
-            if (txt === "/start") await msg.reply({ message: "HUNTER V11 READY" });
-
-            // FILTER
-            if (txt.startsWith("/filter ")) {
-                if (!txt.includes(',')) return await msg.reply({ message: "Error: Missing comma.\nUse: /filter Word, Reply" });
-                
-                // Handle multi-line responses correctly
-                const firstCommaIndex = txt.indexOf(',');
-                const trigger = txt.substring(8, firstCommaIndex).trim(); // Text between "/filter " and ","
-                const response = txt.substring(firstCommaIndex + 1).trim(); // Everything after ","
-                
-                responseFilters.set(trigger, response);
-                await backupDatabase();
-                await msg.reply({ message: `✅ Saved Filter: "${trigger}"` });
-            }
-
-            if (txt.startsWith("/stop ")) {
-                const trig = txt.substring(6).trim();
-                if (responseFilters.delete(trig)) {
-                    await backupDatabase();
-                    await msg.reply({ message: "Filter Deleted." });
-                } else {
-                    await msg.reply({ message: "Filter not found." });
-                }
-            }
-
-            if (txt === "/filters") {
-                let list = "**Filters:**\n";
-                responseFilters.forEach((v, k) => list += `• \`${k}\`\n`);
-                await msg.reply({ message: list, parseMode: "markdown" });
-            }
-
-            // DB
-            if (txt === "/clear") { targetNumbers.clear(); await backupDatabase(); await msg.reply({ message: "DB Cleared." }); }
-
+            if (txt === "/clear") { targetNumbers.clear(); await backupNumbers(); await msg.reply({ message: "Numbers Wiped." }); }
+            
             if (txt.startsWith("/join ")) {
                 let h = txt.split(" ")[1].replace(/https:\/\/t\.me\/(\+|joinchat\/)/, "");
                 await clientA.invoke(new Api.messages.ImportChatInvite({ hash: h }));
                 await msg.reply({ message: "Joined." });
             }
 
-            // SEARCH
             if (txt.startsWith("/s ")) {
                 const rawQuery = txt.split(" ")[1];
                 if (!rawQuery) return await msg.reply({ message: "Use: /s 5870" });
-                const suffix = rawQuery.replace(/\D/g, '').slice(-4);
+                const suffix = rawQuery.replace(/\D/g, '').slice(-4); 
                 const chatId = msg.chatId;
 
-                await msg.reply({ message: `Searching *${suffix}*...`, parseMode: 'markdown' });
+                await msg.reply({ message: `🔍 Searching *${suffix}*...`, parseMode: 'markdown' });
 
                 const res = await clientA.invoke(new Api.messages.SearchGlobal({
                     q: suffix, filter: new Api.InputMessagesFilterEmpty(),
-                    minDate: Math.floor(Date.now()/1000) - 900, limit: 50,
-                    offsetRate: 0, offsetPeer: new Api.InputPeerEmpty(), offsetId: 0, folderId: 0, maxDate: 0
+                    minDate: Math.floor(Date.now()/1000) - 86400, 
+                    limit: 50, offsetRate: 0, offsetPeer: new Api.InputPeerEmpty(), offsetId: 0, folderId: 0, maxDate: 0
                 }));
 
                 let found = false;
@@ -227,7 +162,7 @@ let ghostMode = true;
                         if (fText.includes(suffix)) {
                             const otp = findOTP(fText);
                             if (otp) {
-                                await msg.reply({ message: `[HISTORY] OTP: \`${otp}\``, parseMode: "markdown" });
+                                await msg.reply({ message: `[HISTORY MATCH]\nOTP: \`${otp}\``, parseMode: "markdown" });
                                 found = true; break;
                             }
                         }
@@ -235,13 +170,13 @@ let ghostMode = true;
                 }
 
                 if (!found) {
-                    await msg.reply({ message: "Listening live (1 min)..." });
+                    await msg.reply({ message: `Listening live (2 mins)...` });
                     const timer = setTimeout(() => {
                         if (pendingSearches.has(suffix)) {
                             pendingSearches.delete(suffix);
                             clientA.sendMessage(chatId, { message: "Search Timeout." });
                         }
-                    }, 60000);
+                    }, 120000);
                     pendingSearches.set(suffix, { chatId, timer });
                 }
             }
@@ -253,49 +188,125 @@ let ghostMode = true;
                     const nums = extractNumbers(buf.toString('utf8'));
                     if (txt === "/save") { nums.forEach(n => targetNumbers.add(n)); await msg.reply({ message: `Added ${nums.length}.` }); }
                     else { nums.forEach(n => targetNumbers.delete(n)); await msg.reply({ message: `Removed ${nums.length}.` }); }
-                    await backupDatabase();
+                    await backupNumbers();
                 }
             }
 
-        } catch (e) {
-            console.error("Command Error:", e);
-            await msg.reply({ message: "Error: " + e.message });
-        }
+        } catch (e) { await msg.reply({ message: "Error: " + e.message }); }
 
     }, new NewMessage({ incoming: true, outgoing: true }));
 })();
 
 
 // ============================================================================
-//  CORE 2: CLIENT B (GHOST)
+//  CORE 2: CLIENT B (THE GHOST + AUTO-RESPONDER)
+//  - Tasks: Ghost Mode, Online Status, /filter (Auto-Reply)
 // ============================================================================
 (async () => {
     if (!process.env.SESSION_STRING_B) return console.log("Skipping Client B");
 
     const clientB = new TelegramClient(sessionB, apiId, apiHash, { connectionRetries: 10, useWSS: false });
-    await clientB.start({ onError: (err) => console.log("Client B Error:", err) });
-    console.log("✅ Ghost Online");
+    
+    try {
+        await clientB.start({ onError: (err) => console.log("Client B Error:", err) });
+        console.log("✅ Ghost (B) Online");
+    } catch (e) {
+        console.log("❌ Client B Failed. Check Session B.", e);
+    }
 
-    setInterval(() => {
-        clientB.getMe().catch(e => console.log("Heartbeat B failed"));
-    }, 30000);
+    setInterval(() => { clientB.getMe().catch(() => {}); }, 30000);
 
+    // --- DATABASE B (Filters Only) ---
+    async function backupFilters() {
+        try {
+            const payload = { version: 1, filters: Object.fromEntries(responseFilters) };
+            const buffer = Buffer.from(JSON.stringify(payload, null, 2), 'utf8');
+            buffer.name = "filters_backup.json"; 
+            await clientB.sendMessage("me", { message: "FILTERS_BACKUP_DO_NOT_DELETE", file: buffer, forceDocument: true });
+        } catch (e) { console.error("Backup B Fail:", e); }
+    }
+
+    async function restoreFilters() {
+        try {
+            const result = await clientB.getMessages("me", { search: "FILTERS_BACKUP_DO_NOT_DELETE", limit: 1 });
+            if (result && result.length > 0 && result[0].media) {
+                const buffer = await clientB.downloadMedia(result[0], {});
+                const rawData = JSON.parse(buffer.toString('utf8'));
+                if (rawData.filters) Object.entries(rawData.filters).forEach(([k, v]) => responseFilters.set(k, v));
+                console.log(`[B] Loaded ${responseFilters.size} filters.`);
+            }
+        } catch (e) { console.error("Restore B Fail:", e); }
+    }
+    await restoreFilters();
+
+    // --- STATUS ---
     async function keepOnline() { try { await clientB.invoke(new Api.account.UpdateStatus({ offline: false })); } catch (e) {} }
 
+    // --- MONITORING (Ghost + Filters) ---
     clientB.addEventHandler(async (event) => {
         const msg = event.message;
+        const text = msg.text || "";
         const sender = msg.senderId ? Number(msg.senderId) : null;
-        const txt = msg.text || "";
 
+        // 1. AUTO-RESPONDER (Filters)
+        if (responseFilters.size > 0) {
+            for (const [trigger, response] of responseFilters) {
+                // Check if message contains trigger (Case Insensitive)
+                if (text.toLowerCase().includes(trigger.toLowerCase())) {
+                    // Prevent responding to self to avoid infinite loops
+                    if (msg.out) continue; 
+                    
+                    try { 
+                        await msg.reply({ message: response }); 
+                        console.log(`[B-FILTER] Triggered: ${trigger}`);
+                        return; // Stop processing
+                    } catch (e) {}
+                }
+            }
+        }
+
+        // 2. GHOST MODE (Auto-Read)
         if (!ghostMode && msg.incoming) { try { await clientB.markAsRead(msg.chatId); } catch (e) {} }
         
+        // 3. COMMANDS (Auth Check)
         if (!msg.out && !allowedUsers.includes(sender)) return;
 
-        if (txt === "/start") await msg.reply({ message: "GHOST ONLINE" });
-        if (txt === "/online on") { if (onlineInterval) clearInterval(onlineInterval); onlineInterval = setInterval(keepOnline, 60000); await keepOnline(); await msg.reply({ message: "ON" }); }
-        if (txt === "/online off") { if (onlineInterval) { clearInterval(onlineInterval); onlineInterval = null; } await clientB.invoke(new Api.account.UpdateStatus({ offline: true })); await msg.reply({ message: "OFF" }); }
-        if (txt === "/ghost on") { ghostMode = true; await msg.reply({ message: "Ghost ON" }); }
-        if (txt === "/ghost off") { ghostMode = false; await msg.reply({ message: "Ghost OFF" }); }
+        if (txt === "/ping") await msg.reply({ message: "👻 **Ghost (B):** ALIVE" });
+        if (txt === "/start") await msg.reply({ message: "GHOST V13 ONLINE\nUse /filter, /online, /ghost" });
+
+        // --- FILTER COMMANDS (Now on Client B) ---
+        if (text.startsWith("/filter ")) {
+            if (!text.includes(',')) return await msg.reply({ message: "Error: Missing comma.\nUsage: /filter Trigger, Response" });
+            const firstComma = text.indexOf(',');
+            const trigger = text.substring(8, firstComma).trim();
+            const response = text.substring(firstComma + 1).trim();
+            
+            responseFilters.set(trigger, response);
+            await backupFilters();
+            await msg.reply({ message: `✅ Filter Set on Client B:\n"${trigger}"` });
+        }
+
+        if (text.startsWith("/stop ")) {
+            const trig = text.substring(6).trim();
+            if (responseFilters.delete(trig)) {
+                await backupFilters();
+                await msg.reply({ message: "🗑 Filter Deleted." });
+            } else {
+                await msg.reply({ message: "❌ Filter not found." });
+            }
+        }
+
+        if (text === "/filters") {
+            let list = "**Active Filters (Client B):**\n";
+            responseFilters.forEach((v, k) => list += `• \`${k}\`\n`);
+            await msg.reply({ message: list });
+        }
+
+        // --- GHOST COMMANDS ---
+        if (text === "/online on") { if (onlineInterval) clearInterval(onlineInterval); onlineInterval = setInterval(keepOnline, 60000); await keepOnline(); await msg.reply({ message: "🟢 ON" }); }
+        if (text === "/online off") { if (onlineInterval) { clearInterval(onlineInterval); onlineInterval = null; } await clientB.invoke(new Api.account.UpdateStatus({ offline: true })); await msg.reply({ message: "🔴 OFF" }); }
+        if (text === "/ghost on") { ghostMode = true; await msg.reply({ message: "👻 Ghost ON" }); }
+        if (text === "/ghost off") { ghostMode = false; await msg.reply({ message: "👀 Ghost OFF" }); }
 
     }, new NewMessage({ incoming: true, outgoing: true }));
 })();
